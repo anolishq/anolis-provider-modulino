@@ -21,7 +21,6 @@ use anolis_provider_sdk::{
     Args, BoxError, CallContext, Device, DeviceHealth, DeviceState, Function, HostRequirement, Provider, ProviderError,
     Readings, Results,
 };
-use linux_embedded_hal::I2cdev;
 use modulino_driver::sim::{SimBus, SimHub};
 use modulino_driver::{Address, ChipKind};
 use std::collections::BTreeMap;
@@ -163,12 +162,8 @@ fn simulated(config: &Config) -> SimBus {
     })
 }
 
-fn open(config: &Config) -> Result<Bus, BoxError> {
-    if config.mock {
-        return Ok(Bus::Sim(simulated(config)));
-    }
-    let dev = I2cdev::new(&config.bus).map_err(|e| format!("cannot open {}: {e}", config.bus))?;
-    Ok(Bus::Linux(dev))
+fn open(config: &Config) -> Bus {
+    if config.mock { Bus::Sim(simulated(config)) } else { Bus::linux(&config.bus) }
 }
 
 impl Provider for ModulinoProvider {
@@ -201,7 +196,7 @@ impl Provider for ModulinoProvider {
     }
 
     fn new(config: Config) -> Result<Self, BoxError> {
-        Ok(Self::on_bus(&config, &Arc::new(Mutex::new(open(&config)?))))
+        Ok(Self::on_bus(&config, &Arc::new(Mutex::new(open(&config)))))
     }
 
     /// Connect every board, putting its outputs in their safe state. A board
@@ -290,7 +285,7 @@ mod tests {
     fn sim<R>(shared: &Shared, f: impl FnOnce(&mut SimBus) -> R) -> R {
         match &mut *shared.lock().unwrap() {
             Bus::Sim(sim) => f(sim),
-            Bus::Linux(_) => unreachable!("tests run on the simulated bus"),
+            Bus::Linux { .. } => unreachable!("tests run on the simulated bus"),
         }
     }
 
@@ -410,6 +405,25 @@ mod tests {
         relay_present(&shared, true);
         assert!(slot.finish().is_ok());
         assert_eq!(relay_frame(&shared).unwrap(), off, "stop switched the relay off");
+    }
+
+    /// Before I2C is enabled, the provider still starts, and each board is
+    /// unreachable with the reason, as a provider installed before host prep
+    /// should report it.
+    #[test]
+    fn a_missing_bus_leaves_the_provider_up_and_its_boards_unreachable() {
+        let bus = "/nonexistent/i2c-1";
+        let config = Config {
+            bus: bus.into(),
+            mock: false,
+            devices: vec![DeviceConfig { id: "relay".into(), ..config(BoardType::OptoRelay, None) }],
+        };
+        let mut provider = ModulinoProvider::new(config).expect("starts without the bus");
+        provider.start(Duration::ZERO).unwrap();
+        let device = provider.devices()[0].clone();
+        let health = provider.device_health(&device).expect("the board is reported");
+        assert_eq!(health.state, DeviceState::Unreachable);
+        assert!(health.message.contains(&format!("cannot open {bus}")), "{}", health.message);
     }
 
     /// Through the provider itself, as the SDK calls it at session end.
