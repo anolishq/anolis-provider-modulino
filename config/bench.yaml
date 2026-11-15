@@ -1,0 +1,24 @@
+# The bench run (docs/bench.md): one of each board on the Raspberry Pi's I2C
+# bus 1, each at its factory address. Check the addresses with
+# `i2cdetect -y -a 1 0x01 0x77` first, and give an `address` for any board
+# found elsewhere: the provider looks for a Knob at 0x3A only, so one strapped
+# for 0x3B needs `address: 0x3B`; an earlier address change moves a board too. The Thermo is found at 0x44 (HS3003) or 0x45 (SHT31) and takes
+# no `address`; the Movement board without one is tried at 0x6A, then 0x6B.
+bus: /dev/i2c-1
+mock: false
+devices:
+  - { id: buttons0, type: buttons }
+  - { id: buzzer0, type: buzzer }
+  - { id: vibro0, type: vibro }
+  - { id: pixels0, type: pixels }
+  - { id: knob0, type: knob }
+  - { id: joystick0, type: joystick }
+  - { id: opto0, type: opto_relay }
+  - { id: latch0, type: latch_relay }
+  - { id: matrix0, type: led_matrix }
+  - { id: motors0, type: motors }
+  - { id: thermo0, type: thermo }
+  - { id: pressure0, type: pressure }
+  - { id: light0, type: light }
+  - { id: movement0, type: movement }
+  - { id: distance0, type: distance }

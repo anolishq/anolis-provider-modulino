@@ -1,0 +1,61 @@
+# Anolis runtime config for the bench run (docs/bench.md). Start the runtime
+# from the root of this repository, after `cargo build --release`:
+#   anolis-runtime --config config/bench-runtime.yaml
+# The hub step uses config/bench-hub-runtime.yaml instead.
+runtime:
+  name: modulino-bench
+  # Relative to this file: target/bench-data at the repository root, ignored.
+  data_dir: ../target/bench-data
+  shutdown_timeout_ms: 3000
+  startup_timeout_ms: 30000
+
+http:
+  enabled: true
+  bind: 127.0.0.1
+  port: 8080
+  cors_allow_credentials: false
+
+providers:
+  - id: modulino0
+    command: ./target/release/anolis-provider-modulino
+    args: ["--config", "config/bench.yaml"]
+    timeout_ms: 5000
+    hello_timeout_ms: 5000
+    ready_timeout_ms: 10000
+    restart_policy:
+      enabled: true
+      max_attempts: 3
+      backoff_ms: [200, 500, 1000]
+      timeout_ms: 30000
+
+polling:
+  interval_ms: 500
+
+telemetry:
+  enabled: false
+
+automation:
+  enabled: false
+
+# What POST /v0/estop runs, and what runs once at startup: every output in
+# the safe state docs/boards.md gives it, the motors first. They get both the
+# DC stop and the stepper release, as the provider's own safe state does when
+# it cannot read the board's mode. GET /v0/runtime/status lists the other
+# actuating functions (tone, set_speeds, ...) as uncovered: with hooks, the
+# runtime counts only the functions a hook calls, and these hooks turn off
+# what those functions turn on.
+safety:
+  safe_state:
+    hooks:
+      - { device_handle: modulino0/motors0, function_name: stop }
+      - { device_handle: modulino0/motors0, function_name: release_coils }
+      - { device_handle: modulino0/buttons0, function_name: set_leds, args: { a: false, b: false, c: false } }
+      - { device_handle: modulino0/buzzer0, function_name: no_tone }
+      - { device_handle: modulino0/vibro0, function_name: "off" }
+      - { device_handle: modulino0/pixels0, function_name: "off" }
+      - { device_handle: modulino0/opto0, function_name: set, args: { on: false } }
+      - { device_handle: modulino0/latch0, function_name: set, args: { on: false } }
+      - { device_handle: modulino0/matrix0, function_name: clear }
+
+logging:
+  level: info

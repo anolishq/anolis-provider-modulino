@@ -8,3 +8,5 @@ and the Rust provider SDK.
 - [Hardware](hardware.md): wiring, host preparation, what happens to the
   outputs when the provider exits, and the hardware status: what has and has
   not run on real boards.
+- [Bench run](bench.md): how to run every board through the runtime on a
+  Raspberry Pi, and record the results.

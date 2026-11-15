@@ -1,0 +1,164 @@
+# Bench run
+
+How to run this provider on the boards, for
+[#5](https://github.com/anolishq/anolis-provider-modulino/issues/5):
+modulino-driver's own bench checklist first, then every board through the
+Anolis runtime. The results go on that issue, and a board moves to `tested` on
+the site's Hardware support table only from them
+([hardware.md](hardware.md#hardware-status)).
+
+Nothing here has run on a Modulino board yet. The configs and
+`scripts/bench.py` have run only against the simulated boards (`mock: true`),
+with anolis-runtime 0.16.0.
+
+## Hosts
+
+Run it on a Raspberry Pi 5 and on a Pi 4 B. Their I2C controllers have
+different kernel drivers (`i2c-designware` and `i2c-bcm2835`; the driver's
+checklist has the table), and how each reports an address nobody answers is
+one of the open questions. A Pi 3 A+ uses the same driver as the Pi 4 B, so a
+run there repeats it on a slower host with less memory.
+
+Each Pi needs the 64-bit Raspberry Pi OS based on Debian 13 (Trixie). The
+runtime is released for 64-bit Linux only (`linux-arm64`), and its 0.16.0
+binary needs glibc 2.38 (`objdump -T bin/anolis-runtime` lists `GLIBC_2.38`),
+newer than Debian 12 (Bookworm) ships.
+
+## Order, on each host
+
+1. modulino-driver's bench checklist (its
+   [`docs/bench.md`](https://github.com/CameronBrooks11/modulino-driver/blob/main/docs/bench.md)).
+   Its step 1.1 measures whether the Pi reports an empty address as
+   `EREMOTEIO`, which this provider maps to a NACK
+   ([hardware.md](hardware.md#host-preparation)).
+2. Every board through the runtime: [All boards](#all-boards) below.
+3. The [hub step](#hub-step).
+
+## Set up
+
+On the Pi, with I2C enabled (the driver checklist's setup step 1) and Rust 1.88
+or later from rustup (<https://rustup.rs>). Trixie's own `cargo` package is
+1.85, too old for this provider: the Rust SDK uses `let` chains, stable since
+1.88.
+
+```bash
+cargo --version   # 1.88 or later; apt's /usr/bin/cargo (1.85) must not come first
+git clone https://github.com/anolishq/anolis-provider-modulino
+cd anolis-provider-modulino
+cargo build --release --locked
+```
+
+If the build runs out of memory (the Pi 3 A+ has 512 MB), build on the Pi 5
+and copy `target/release/anolis-provider-modulino` into the smaller Pi's clone
+at the same path (`mkdir -p target/release` there first). Both run the same 64-bit Trixie, so the binary's libraries
+match.
+
+The runtime, from its release, into this clone:
+
+```bash
+ANOLIS=0.16.0
+curl -fsSLO https://github.com/anolishq/anolis/releases/download/v$ANOLIS/anolis-$ANOLIS-linux-arm64.tar.gz
+curl -fsSL -o anolis.SHA256SUMS https://github.com/anolishq/anolis/releases/download/v$ANOLIS/SHA256SUMS
+sha256sum -c --ignore-missing anolis.SHA256SUMS
+tar -xzf anolis-$ANOLIS-linux-arm64.tar.gz   # bin/anolis-runtime
+bin/anolis-runtime --version                 # fails here on a too-old OS
+```
+
+## All boards
+
+1. With the Pi off, chain one of each board on the header (wiring in
+   [hardware.md](hardware.md#wiring)). Put the two DC motors on the Motors
+   board's outputs, free to turn, and have a stepper ready to swap in.
+2. Power on and list the addresses:
+
+   ```bash
+   i2cdetect -y -a 1 0x01 0x77
+   ```
+
+   Compare them with the comment at the top of `config/bench.yaml`. Give an
+   `address` to any board found elsewhere, a Knob at 0x3B included; the
+   Thermo is the exception, found at either of its two addresses without one.
+3. Check the host and the config:
+
+   ```bash
+   ./target/release/anolis-provider-modulino --check-host config/bench.yaml
+   ./target/release/anolis-provider-modulino --check-config config/bench.yaml
+   ```
+
+4. Start the runtime from the root of the clone, and leave it running:
+
+   ```bash
+   bin/anolis-runtime --config config/bench-runtime.yaml
+   ```
+
+   At startup it runs the safe state in `config/bench-runtime.yaml`, so every
+   output should be off.
+5. In a second terminal:
+
+   ```bash
+   scripts/bench.py
+   ```
+
+   It asks what you saw at each step, and writes the answers to
+   `target/bench-results.md`:
+   - It reads every board and calls every function, saying what to look for.
+     It pauses to swap the DC motors for the stepper and back.
+   - It turns the outputs on, runs the runtime's software stop
+     (`POST /v0/estop`), and asks whether everything went off.
+   - It asks you to unplug, one at a time, the Buttons board and the three
+     sensors, waits until the runtime has lost each, then watches while you
+     plug it back in: keep each board out until it asks. A sensor's first
+     reading after the replug must be a real sample, not zeros
+     ([#7](https://github.com/anolishq/anolis-provider-modulino/issues/7)).
+     A board already back when the watch began is recorded as such, since its
+     first reading was missed. On real boards the runtime also latches the
+     lost device and, when it returns, sends its safe state again (Buttons
+     LEDs off), with warnings in its log; that does not block the script's
+     calls.
+   - It turns the outputs on again with the stepper holding, and asks you to
+     stop the runtime with Ctrl-C. The provider's own stop must then turn
+     everything off and let the stepper go free.
+
+   If the script stops early (Ctrl-C in its terminal, or an error), it runs
+   the software stop before it exits. If it cannot, run
+   `curl -s -X POST http://127.0.0.1:8080/v0/estop`, or stop the runtime. The
+   software stop's latch outlasts a runtime restart: release it with
+   `curl -s -X POST http://127.0.0.1:8080/v0/estop/clear` before the next run.
+
+   `GET /v0/runtime/status` lists eight actuating functions (`tone`,
+   `set_speeds`, and others) as uncovered by the software stop. With hooks,
+   the runtime counts only the functions a hook calls; the hooks turn off what
+   those functions turn on.
+
+## Hub step
+
+Only the Modulino Hub on the Pi's bus, at 0x70, with the Buttons board on
+port 0 and the opto relay on port 1:
+
+```bash
+bin/anolis-runtime --config config/bench-hub-runtime.yaml
+scripts/bench.py --unplug buttons0 --out target/bench-results-hub.md
+```
+
+Each board must answer through its own port only; the driver checklist's step
+2.2 checks the same thing below the provider.
+
+## Record
+
+Post on [#5](https://github.com/anolishq/anolis-provider-modulino/issues/5) a
+comment for each host: both results files, the provider and driver commits
+(`git rev-parse HEAD`; `Cargo.lock` pins the driver), the runtime version, and
+anything that did not match what the script said to look for. A mismatch is an
+issue of its own, linked from there.
+
+## Not covered here
+
+When the Motors board's mode cannot be read at stop, the provider sends the
+stop and then the release. The tests check that the release is sent, but not
+that the stop went first, and a bench cannot produce a read that fails while
+writes still land. That stays unverified.
+
+The script swaps the motors with the board powered, after it stopped them
+(`stop`, or `set_mode dc`). Whether the firmware ignores a stepper command
+in DC mode, and the reverse, is read from the firmware source by
+modulino-driver, not measured.

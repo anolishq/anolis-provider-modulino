@@ -1,0 +1,12 @@
+# The hub step of the bench run (docs/bench.md): only the Modulino Hub on the
+# Pi's bus, at 0x70, with the Buttons board on port 0 and the opto relay on
+# port 1. Each board must answer only on its own port.
+bus: /dev/i2c-1
+mock: false
+devices:
+  - id: buttons0
+    type: buttons
+    hub: { address: 0x70, port: 0 }
+  - id: opto0
+    type: opto_relay
+    hub: { address: 0x70, port: 1 }
