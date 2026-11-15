@@ -54,7 +54,7 @@ jobs:
       - name: Conformance against the provider
         run: |
           cargo build --locked
-          python scripts/conformance.py target/debug/anolis-provider-template-rust
+          python scripts/conformance.py target/debug/anolis-provider-modulino
 
   static:
     name: Static binary (${{ matrix.arch }})
@@ -77,7 +77,7 @@ jobs:
       - name: Build the static binary
         run: |
           cargo build --locked --release --target "$(uname -m)-unknown-linux-musl"
-          bin="target/$(uname -m)-unknown-linux-musl/release/anolis-provider-template-rust"
+          bin="target/$(uname -m)-unknown-linux-musl/release/anolis-provider-modulino"
           file "$bin"
           if ldd "$bin" 2>/dev/null | grep -q '=>'; then
             echo "::error::the release binary links shared libraries"
@@ -90,7 +90,7 @@ jobs:
         run: python -m pip install "$HARNESS_WHEEL"
       # The release artifact under the harness, not only the debug build.
       - name: Conformance against the static binary
-        run: python scripts/conformance.py "target/$(uname -m)-unknown-linux-musl/release/anolis-provider-template-rust"
+        run: python scripts/conformance.py "target/$(uname -m)-unknown-linux-musl/release/anolis-provider-modulino"
 
   rename:
     name: Rename still builds

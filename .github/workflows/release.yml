@@ -3,11 +3,11 @@ name: Release
 # On a v* tag: build the static binary on x86_64 and arm64, run the conformance
 # harness against each, and publish what anolis install.sh and the Workbench
 # read (anolis docs/deploy/install-sh.md, "What a provider release must provide"):
-#   anolis-provider-template-rust-<version>-linux-<arch>.tar.gz   bin/anolis-provider-template-rust at the root
+#   anolis-provider-modulino-<version>-linux-<arch>.tar.gz   bin/anolis-provider-modulino at the root
 #   SHA256SUMS                                             every tarball
-#   anolis-provider-template-rust-<version>-config-schema.json    the --config-schema envelope
-#   anolis-provider-template-rust-<version>-config-schema-manifest.json
-#   anolis-provider-template-rust-<version>-source.tar.gz  the tagged source, for the org's
+#   anolis-provider-modulino-<version>-config-schema.json    the --config-schema envelope
+#   anolis-provider-modulino-<version>-config-schema-manifest.json
+#   anolis-provider-modulino-<version>-source.tar.gz  the tagged source, for the org's
 #                                                          compatibility matrix (config/ inside)
 
 on:
@@ -57,8 +57,8 @@ jobs:
           rustup toolchain install stable --profile minimal && rustup default stable
           rustup target add "$(uname -m)-unknown-linux-musl"
           cargo build --locked --release --target "$(uname -m)-unknown-linux-musl"
-          cp "target/$(uname -m)-unknown-linux-musl/release/anolis-provider-template-rust" .
-          if ldd anolis-provider-template-rust 2>/dev/null | grep -q '=>'; then
+          cp "target/$(uname -m)-unknown-linux-musl/release/anolis-provider-modulino" .
+          if ldd anolis-provider-modulino 2>/dev/null | grep -q '=>'; then
             echo "::error::the release binary links shared libraries"
             exit 1
           fi
@@ -66,12 +66,12 @@ jobs:
       - name: Conformance against the static binary
         run: |
           python -m pip install "$HARNESS_WHEEL"
-          python scripts/conformance.py anolis-provider-template-rust
+          python scripts/conformance.py anolis-provider-modulino
 
       - name: Check the binary reports the tagged version
         run: |
-          reported="$(./anolis-provider-template-rust --version)"
-          [ "$reported" = "anolis-provider-template-rust ${{ steps.version.outputs.version }}" ] || {
+          reported="$(./anolis-provider-modulino --version)"
+          [ "$reported" = "anolis-provider-modulino ${{ steps.version.outputs.version }}" ] || {
             echo "::error::--version printed '${reported}'"
             exit 1
           }
@@ -80,16 +80,16 @@ jobs:
         run: |
           version="${{ steps.version.outputs.version }}"
           mkdir -p staging/bin out
-          cp anolis-provider-template-rust staging/bin/
-          tar -czf "out/anolis-provider-template-rust-${version}-linux-${{ matrix.arch }}.tar.gz" -C staging .
-          tar -tzf "out/anolis-provider-template-rust-${version}-linux-${{ matrix.arch }}.tar.gz"
+          cp anolis-provider-modulino staging/bin/
+          tar -czf "out/anolis-provider-modulino-${version}-linux-${{ matrix.arch }}.tar.gz" -C staging .
+          tar -tzf "out/anolis-provider-modulino-${version}-linux-${{ matrix.arch }}.tar.gz"
 
       - name: Emit the config schema envelope (executable profile v1 §2)
         if: matrix.arch == 'x86_64'
         run: |
           version="${{ steps.version.outputs.version }}"
-          envelope="anolis-provider-template-rust-${version}-config-schema.json"
-          ./anolis-provider-template-rust --config-schema > "out/${envelope}"
+          envelope="anolis-provider-modulino-${version}-config-schema.json"
+          ./anolis-provider-modulino --config-schema > "out/${envelope}"
           python3 - "out/${envelope}" <<'EOF'
           import json, sys
           d = json.load(open(sys.argv[1]))
@@ -105,7 +105,7 @@ jobs:
             --arg asset "${envelope}" \
             --arg sha256 "${sha}" \
             '{schema_version: $schema_version, repo: $repo, component: $component, version: $version, asset: $asset, sha256: $sha256}' \
-            > "out/anolis-provider-template-rust-${version}-config-schema-manifest.json"
+            > "out/anolis-provider-modulino-${version}-config-schema-manifest.json"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -130,8 +130,8 @@ jobs:
       - name: Source tarball
         run: |
           version="${GITHUB_REF_NAME#v}"
-          git archive --format=tar.gz --prefix="anolis-provider-template-rust-${version}/" \
-            -o "out/anolis-provider-template-rust-${version}-source.tar.gz" "${GITHUB_REF_NAME}"
+          git archive --format=tar.gz --prefix="anolis-provider-modulino-${version}/" \
+            -o "out/anolis-provider-modulino-${version}-source.tar.gz" "${GITHUB_REF_NAME}"
 
       - name: Checksums
         working-directory: out
