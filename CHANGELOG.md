@@ -8,9 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- A provider of simulated heaters on the Rust provider SDK, passing the
-  conformance harness at level 2 with no skips. CI also runs the harness
-  against the static release binary on x86_64 and arm64.
-- A release workflow publishing what `install.sh` and the Workbench read, plus
-  the tagged source for the ADPP compatibility matrix.
-- `scripts/rename.sh`, which renames the provider after "Use this template".
+- A provider for Arduino Modulino boards on modulino-driver and the Rust
+  provider SDK: buttons, buzzer, vibro, pixels, knob, joystick, opto and latch
+  relays, LED matrix, motors, thermo, pressure, light, movement and distance,
+  on a Linux I2C bus or behind a Modulino Hub port. Each output is put in its
+  safe state the first time its board is connected and, for every board, when
+  the session ends.
+- Mock mode (`mock: true`) on modulino-driver's simulated boards. In it the
+  provider passes the anolis-protocol 1.10.0 conformance harness at level 2,
+  with four skips listed in `scripts/conformance.py`: no function declares
+  results or takes a double argument.
+- Not yet run on hardware: neither modulino-driver nor this provider has been
+  run on a Modulino board (docs/hardware.md).

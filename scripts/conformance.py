@@ -19,7 +19,12 @@ REPO = Path(__file__).resolve().parents[1]
 
 # A skip not listed here fails the run. List one only with the reason the
 # harness cannot exercise it on this provider.
-EXPECTED_SKIPS: dict[str, str] = {}
+EXPECTED_SKIPS: dict[str, str] = {
+    "test_call_declared_results_are_populated": "no Modulino function declares results",
+    "test_l2_non_finite_double_is_invalid_argument[nan]": "no Modulino function takes a double argument",
+    "test_l2_non_finite_double_is_invalid_argument[inf]": "no Modulino function takes a double argument",
+    "test_l2_non_finite_double_is_invalid_argument[-inf]": "no Modulino function takes a double argument",
+}
 
 
 def main() -> int:
