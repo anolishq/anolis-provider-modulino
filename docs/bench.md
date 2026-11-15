@@ -36,10 +36,10 @@ newer than Debian 12 (Bookworm) ships.
 
 ## Set up
 
-On the Pi, with I2C enabled and Rust 1.85 or later (the driver checklist's
-setup steps 1 and 2 cover both; on Trixie, `sudo apt install cargo` gives
-1.85). The provider uses Rust edition 2024, which needs 1.85; CI builds it
-only with the current stable Rust, so 1.85 itself is untried.
+On the Pi, with I2C enabled (the driver checklist's setup step 1) and Rust 1.88
+or later from rustup (<https://rustup.rs>). Trixie's own `cargo` package is
+1.85, too old for this provider: the Rust SDK uses `let` chains, stable since
+1.88.
 
 ```bash
 git clone https://github.com/anolishq/anolis-provider-modulino
@@ -47,16 +47,10 @@ cd anolis-provider-modulino
 cargo build --release --locked
 ```
 
-If the build runs out of memory (the Pi 3 A+ has 512 MB), build a static
-binary on the Pi 5 instead. That needs rustup, not apt's cargo:
-
-```bash
-rustup target add aarch64-unknown-linux-musl
-cargo build --release --locked --target aarch64-unknown-linux-musl
-```
-
-and copy `target/aarch64-unknown-linux-musl/release/anolis-provider-modulino`
-into the smaller Pi's clone, at `target/release/`.
+If the build runs out of memory (the Pi 3 A+ has 512 MB), build on the Pi 5
+and copy `target/release/anolis-provider-modulino` into the smaller Pi's clone
+at the same path. Both run the same 64-bit Trixie, so the binary's libraries
+match.
 
 The runtime, from its release, into this clone:
 
@@ -80,9 +74,9 @@ bin/anolis-runtime --version                 # fails here on a too-old OS
    i2cdetect -y -a 1 0x01 0x77
    ```
 
-   Compare them with the comment at the top of `config/bench.yaml`, and give
-   an `address` to any board found away from its factory address, except the
-   Thermo, which the provider finds at either of its two.
+   Compare them with the comment at the top of `config/bench.yaml`. Give an
+   `address` to any board found elsewhere, a Knob at 0x3B included; the
+   Thermo is the exception, found at either of its two addresses without one.
 3. Check the host and the config:
 
    ```bash
@@ -110,9 +104,10 @@ bin/anolis-runtime --version                 # fails here on a too-old OS
      It pauses to swap the DC motors for the stepper and back.
    - It turns the outputs on, runs the runtime's software stop
      (`POST /v0/estop`), and asks whether everything went off.
-   - It asks you to unplug and replug, one at a time, the Buttons board and
-     the three sensors. The first reading after each replug must be a real
-     one, not zeros
+   - It asks you to unplug, one at a time, the Buttons board and the three
+     sensors, waits until the runtime has lost each, then watches while you
+     plug it back in. The first reading after each replug must be a real one,
+     not zeros
      ([#7](https://github.com/anolishq/anolis-provider-modulino/issues/7)).
    - It turns the outputs on again with the stepper holding, and asks you to
      stop the runtime with Ctrl-C. The provider's own stop must then turn

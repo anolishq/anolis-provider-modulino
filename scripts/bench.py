@@ -101,7 +101,8 @@ STOP_SETUP: list[tuple[str, str, dict]] = [
     ("latch_relay", "set", {"on": True}),
     ("led_matrix", "show_mono", {"pixels": bytes([0xFF] * 12)}),
     ("buzzer", "tone", {"frequency_hz": 440, "duration_ms": 0}),
-    ("vibro", "vibrate", {"duration_ms": 60000, "power": 50}),
+    # Long enough to outlast the motor swap before the provider's own stop.
+    ("vibro", "vibrate", {"duration_ms": 600000, "power": 50}),
     ("motors", "set_mode", {"mode": "dc"}),
     ("motors", "set_speeds", {"a": 8000, "b": 8000}),
 ]
@@ -110,12 +111,13 @@ STOP_SETUP: list[tuple[str, str, dict]] = [
 # same, but the motors in stepper mode with the coils held, so the provider's
 # safe state has to read the mode and release them.
 PROVIDER_STOP_SETUP: list[tuple[str, str, dict]] = [
-    entry for entry in STOP_SETUP if entry[0] != "motors"
-] + [
     ("motors", PAUSE, {"text": "Swap the DC motors for the stepper again"}),
     ("motors", "set_mode", {"mode": "stepper"}),
     ("motors", "step", {"steps": 50, "period_ticks": 100}),
-]
+] + [entry for entry in STOP_SETUP if entry[0] != "motors"]
+
+# Boards whose first reading after a reconnect must be a real sample (#7).
+SENSORS = {"thermo", "pressure", "light", "movement", "distance"}
 
 
 class Bench:
@@ -126,6 +128,7 @@ class Bench:
         self.rows: list[tuple[str, str, str, str]] = []
         self.caps: dict[str, dict] = {}
         self.stopped = False
+        self.contacted = False
 
     def http(self, method: str, path: str, body: dict | None = None) -> dict:
         data = None if body is None else json.dumps(body).encode()
@@ -134,6 +137,7 @@ class Bench:
             request.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
+                self.contacted = True
                 return json.load(response)
         except urllib.error.HTTPError as e:
             try:
@@ -230,7 +234,8 @@ class Bench:
         for kind, name, args in STOP_SETUP:
             if kind in by_type:
                 print(f"  {by_type[kind]}.{name}: {self.call(by_type[kind], name, args)}")
-        self.ask("Outputs on as set up (LEDs, relays, matrix, tone, vibration, motors)? Enter to stop them.")
+        outputs = ", ".join(by_type[kind] for kind in dict.fromkeys(k for k, _, _ in STOP_SETUP) if kind in by_type)
+        self.ask(f"Outputs on as set up ({outputs})? Enter to stop them.")
         stop = self.http("POST", "/v0/estop")
         failed = [f"{a['device_handle']}.{a['function']}" for a in stop.get("actions", []) if not a.get("success")]
         result = f"achieved={stop.get('safe_state_achieved')}, failed={failed or 'none'}"
@@ -246,9 +251,13 @@ class Bench:
             print(f"\n== {device} off the bus and back")
             self.ask(f"Unplug {device}, then press Enter.")
             self.record("unplugged", device, self.wait(device, present=False), self.ask("Anything else on the bus affected?"))
-            self.ask(f"Plug {device} back in, then press Enter.")
+            # Watch from before the replug, so the first reading seen is the
+            # first the runtime took, not one from a later poll.
+            print(f"  Plug {device} back in now; watching for its first reading.")
             first = self.wait(device, present=True)
-            self.record("plugged back", device, first, self.ask("First readings plausible, not zeros?"))
+            kind = next(d["type"] for d in devices if d["device_id"] == device)
+            question = "First readings a real sample, not zeros?" if kind in SENSORS else "Readings back, and right?"
+            self.record("plugged back", device, first, self.ask(question))
 
         if self.prompt:
             print("\n== the provider's own stop")
@@ -259,22 +268,21 @@ class Bench:
                     self.ask(f"{args['text']}, then press Enter.")
                     continue
                 print(f"  {by_type[kind]}.{name}: {self.call(by_type[kind], name, args)}")
-            self.ask(
-                "Outputs on again, the stepper holding. Stop the runtime with Ctrl-C in its terminal"
-                " (the stepper should go free by hand), then press Enter."
-            )
+            holding = " The stepper is holding: after the stop it should turn freely by hand." if "motors" in by_type else ""
+            self.ask(f"Outputs on again ({outputs}).{holding} Stop the runtime with Ctrl-C in its terminal, then press Enter.")
             self.stopped = True
             self.record("runtime stopped", "all", "the provider's stop at session end", self.ask("Every output off?"))
 
     def wait(self, device: str, present: bool) -> str:
-        """Poll until the device's readings are gone, or back. Back, the first
-        readings seen are the ones the runtime took on reconnecting: this polls
-        every 100 ms, faster than the runtime's polling interval."""
-        deadline = time.monotonic() + 15
+        """Poll every 100 ms, faster than the runtime polls, until the
+        device's readings are gone, or back. Started before the board is
+        plugged back in, the first readings seen are the first the runtime
+        took on reconnecting."""
+        deadline = time.monotonic() + 60
         while True:
             now_present, values = self.read(device)
             if now_present == present or time.monotonic() > deadline:
-                result = values + ("" if now_present == present else " (still so after 15 s)")
+                result = values + ("" if now_present == present else " (still so after 60 s)")
                 print(f"  read: {result}")
                 return result
             time.sleep(0.1)
@@ -282,10 +290,18 @@ class Bench:
     def abort(self) -> None:
         """Outputs off after an early stop: the software stop, then its latch
         released, so a later run does not start latched."""
+        if not self.contacted:
+            return
         print("\nstopped early: running the software stop")
-        stop = self.http("POST", "/v0/estop")
+        try:
+            stop = self.http("POST", "/v0/estop")
+            self.http("POST", "/v0/estop/clear")
+        except SystemExit as e:
+            print(f"  {e}. Outputs may still be on: stop the runtime, or run")
+            print(f"  curl -s -X POST {self.url}/v0/estop")
+            self.record("stopped early", "all", "software stop not run: runtime unreachable", "")
+            return
         print(f"  estop: achieved={stop.get('safe_state_achieved')}")
-        self.http("POST", "/v0/estop/clear")
         self.record("stopped early", "all", f"software stop achieved={stop.get('safe_state_achieved')}", "")
 
     def report(self) -> str:
