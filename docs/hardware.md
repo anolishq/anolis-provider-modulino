@@ -19,12 +19,13 @@ level 2, which reads and calls the first configured board, the motors); it
 routes through a hub port; it reports a board that does not answer as
 `UNREACHABLE` and connects it again; it connects a pressure, light or
 movement sensor only once the sensor has a sample; it writes each output's
-safe state at the first connect (tested on the opto relay) and at stop,
-including for a board that was lost during the session or absent at start; and
-its config checks refuse boards that would answer together. The other
-boards' reads and calls are not each exercised. What none of it can show is
-that a real board behaves as the models do: the frame lengths and timings, a
-sensor's readings, or what a relay or motor actually does.
+safe state at the first connect and at stop, including for a board that was
+lost during the session or absent at start (tested on the opto relay; the
+motors' safe state is tested in DC and in stepper mode, at first connect and
+at stop); and its config checks refuse boards that would answer together. The
+other boards' reads and calls are not each exercised. What none of it can
+show is that a real board behaves as the models do: the frame lengths and
+timings, a sensor's readings, or what a relay or motor actually does.
 
 The [Hardware support](https://anolishq.github.io/get-started/hardware) table is
 the one place each board's status is kept. A board moves to `tested` only when

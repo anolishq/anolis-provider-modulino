@@ -430,6 +430,32 @@ mod tests {
         assert!(!on, "the provider's stop switched the relay off");
     }
 
+    /// The safe state follows the mode the Motors board reports: DC motors
+    /// stopped, stepper coils released. Checked at the first connect and
+    /// at stop, with another frame written between the two.
+    #[test]
+    fn motors_safe_state_follows_the_reported_mode() {
+        use modulino_driver::DecayMode;
+        use modulino_driver::codec::motors::{encode_dc_speed, encode_decay, encode_stepper};
+        let at = Kind::Motors.default_address();
+        for (flags, safe) in [(0x00, encode_dc_speed(0, 0).unwrap()), (0x02, encode_stepper(0, 1, 1).unwrap())] {
+            let mut bus = SimBus::new().with_node(Kind::Motors);
+            assert!(bus.set_reading(at, &[0, 0, 0, 0, flags]));
+            let (mut slot, shared) = slot(bus, &config(BoardType::Motors, None));
+            let last = || sim(&shared, |s| s.last_write(at).map(<[u8]>::to_vec));
+            slot.with(|_| Ok(())).unwrap();
+            assert_eq!(last(), Some(safe.to_vec()), "first connect, flags {flags:#04x}");
+            slot.with(|b| match b {
+                Board::Motors(m) => m.set_decay(DecayMode::Slow).map_err(Failure::from),
+                _ => unreachable!("a motors board"),
+            })
+            .unwrap();
+            assert_eq!(last(), Some(encode_decay(DecayMode::Slow).to_vec()));
+            assert!(slot.finish().is_ok());
+            assert_eq!(last(), Some(safe.to_vec()), "stop, flags {flags:#04x}");
+        }
+    }
+
     #[test]
     fn stop_writes_nothing_to_another_kind_of_board() {
         let at = Kind::OptoRelay.default_address();
