@@ -42,6 +42,7 @@ or later from rustup (<https://rustup.rs>). Trixie's own `cargo` package is
 1.88.
 
 ```bash
+cargo --version   # 1.88 or later; apt's /usr/bin/cargo (1.85) must not come first
 git clone https://github.com/anolishq/anolis-provider-modulino
 cd anolis-provider-modulino
 cargo build --release --locked
@@ -49,7 +50,7 @@ cargo build --release --locked
 
 If the build runs out of memory (the Pi 3 A+ has 512 MB), build on the Pi 5
 and copy `target/release/anolis-provider-modulino` into the smaller Pi's clone
-at the same path. Both run the same 64-bit Trixie, so the binary's libraries
+at the same path (`mkdir -p target/release` there first). Both run the same 64-bit Trixie, so the binary's libraries
 match.
 
 The runtime, from its release, into this clone:
@@ -106,16 +107,23 @@ bin/anolis-runtime --version                 # fails here on a too-old OS
      (`POST /v0/estop`), and asks whether everything went off.
    - It asks you to unplug, one at a time, the Buttons board and the three
      sensors, waits until the runtime has lost each, then watches while you
-     plug it back in. The first reading after each replug must be a real one,
-     not zeros
+     plug it back in: keep each board out until it asks. A sensor's first
+     reading after the replug must be a real sample, not zeros
      ([#7](https://github.com/anolishq/anolis-provider-modulino/issues/7)).
+     A board already back when the watch began is recorded as such, since its
+     first reading was missed. On real boards the runtime also latches the
+     lost device and, when it returns, sends its safe state again (Buttons
+     LEDs off), with warnings in its log; that does not block the script's
+     calls.
    - It turns the outputs on again with the stepper holding, and asks you to
      stop the runtime with Ctrl-C. The provider's own stop must then turn
      everything off and let the stepper go free.
 
    If the script stops early (Ctrl-C in its terminal, or an error), it runs
    the software stop before it exits. If it cannot, run
-   `curl -s -X POST http://127.0.0.1:8080/v0/estop`, or stop the runtime.
+   `curl -s -X POST http://127.0.0.1:8080/v0/estop`, or stop the runtime. The
+   software stop's latch outlasts a runtime restart: release it with
+   `curl -s -X POST http://127.0.0.1:8080/v0/estop/clear` before the next run.
 
    `GET /v0/runtime/status` lists eight actuating functions (`tone`,
    `set_speeds`, and others) as uncovered by the software stop. With hooks,

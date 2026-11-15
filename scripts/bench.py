@@ -101,7 +101,7 @@ STOP_SETUP: list[tuple[str, str, dict]] = [
     ("latch_relay", "set", {"on": True}),
     ("led_matrix", "show_mono", {"pixels": bytes([0xFF] * 12)}),
     ("buzzer", "tone", {"frequency_hz": 440, "duration_ms": 0}),
-    # Long enough to outlast the motor swap before the provider's own stop.
+    # Long enough to still be running when the runtime is stopped by hand.
     ("vibro", "vibrate", {"duration_ms": 600000, "power": 50}),
     ("motors", "set_mode", {"mode": "dc"}),
     ("motors", "set_speeds", {"a": 8000, "b": 8000}),
@@ -146,6 +146,8 @@ class Bench:
                 return {"status": {"code": f"HTTP {e.code}", "message": e.reason}}
         except urllib.error.URLError as e:
             raise SystemExit(f"cannot reach the runtime at {self.url}: {e.reason}") from None
+        except OSError as e:  # a timeout from a runtime that stopped answering
+            raise SystemExit(f"no answer from the runtime at {self.url}: {e}") from None
 
     def ask(self, question: str) -> str:
         if not self.prompt:
@@ -249,14 +251,19 @@ class Bench:
                 print(f"\n{device} is not listed; skipped")
                 continue
             print(f"\n== {device} off the bus and back")
-            self.ask(f"Unplug {device}, then press Enter.")
+            self.ask(f"Unplug {device}, keep it out until asked, then press Enter.")
             self.record("unplugged", device, self.wait(device, present=False), self.ask("Anything else on the bus affected?"))
             # Watch from before the replug, so the first reading seen is the
             # first the runtime took, not one from a later poll.
             print(f"  Plug {device} back in now; watching for its first reading.")
             first = self.wait(device, present=True)
             kind = next(d["type"] for d in devices if d["device_id"] == device)
-            question = "First readings a real sample, not zeros?" if kind in SENSORS else "Readings back, and right?"
+            if "(already back" in first or "(still so after" in first:
+                question = "Anything to note?"
+            elif kind in SENSORS:
+                question = "First readings a real sample, not zeros?"
+            else:
+                question = "Readings back, and right?"
             self.record("plugged back", device, first, self.ask(question))
 
         if self.prompt:
@@ -279,8 +286,14 @@ class Bench:
         plugged back in, the first readings seen are the first the runtime
         took on reconnecting."""
         deadline = time.monotonic() + 60
+        first_poll = True
         while True:
             now_present, values = self.read(device)
+            if present and now_present and first_poll:
+                result = values + " (already back when the watch began: not the first reading)"
+                print(f"  read: {result}")
+                return result
+            first_poll = False
             if now_present == present or time.monotonic() > deadline:
                 result = values + ("" if now_present == present else " (still so after 60 s)")
                 print(f"  read: {result}")
@@ -295,14 +308,22 @@ class Bench:
         print("\nstopped early: running the software stop")
         try:
             stop = self.http("POST", "/v0/estop")
-            self.http("POST", "/v0/estop/clear")
         except SystemExit as e:
             print(f"  {e}. Outputs may still be on: stop the runtime, or run")
             print(f"  curl -s -X POST {self.url}/v0/estop")
+            print("  and before the next run, release its latch:")
+            print(f"  curl -s -X POST {self.url}/v0/estop/clear")
             self.record("stopped early", "all", "software stop not run: runtime unreachable", "")
             return
-        print(f"  estop: achieved={stop.get('safe_state_achieved')}")
-        self.record("stopped early", "all", f"software stop achieved={stop.get('safe_state_achieved')}", "")
+        result = f"software stop achieved={stop.get('safe_state_achieved')}"
+        try:
+            self.http("POST", "/v0/estop/clear")
+        except SystemExit as e:
+            print(f"  {e}. The latch is still set: before the next run,")
+            print(f"  curl -s -X POST {self.url}/v0/estop/clear")
+            result += ", latch not released"
+        print(f"  estop: {result}")
+        self.record("stopped early", "all", result, "")
 
     def report(self) -> str:
         lines = [
