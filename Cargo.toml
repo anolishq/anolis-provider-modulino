@@ -9,7 +9,7 @@ publish = false
 anolis-provider-sdk = { git = "https://github.com/anolishq/anolis-provider-sdk-rust", tag = "v0.1.0" }
 embedded-hal = "1"
 linux-embedded-hal = { version = "0.5", default-features = false, features = ["i2c"] }
-modulino-driver = { git = "https://github.com/CameronBrooks11/modulino-driver", rev = "02997e2fd13b13e7acd8243a2a76e984195441a1", version = "0.1.0-dev", features = ["sim"] }
+modulino-driver = { git = "https://github.com/CameronBrooks11/modulino-driver", rev = "5e78c98f740dd1b7a0da3733f66a0a3e318b065d", version = "0.1.0-dev", features = ["sim"] }
 schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 

@@ -341,6 +341,25 @@ mod tests {
     }
 
     #[test]
+    fn connecting_a_sensor_waits_for_its_first_sample() {
+        for (t, chip, addr) in [
+            (BoardType::Pressure, ChipKind::Lps22hb, 0x5C),
+            (BoardType::Light, ChipKind::Ltr381rgb, 0x53),
+            (BoardType::Movement, ChipKind::Lsm6dsox, 0x6A),
+        ] {
+            let addr = Address::new(addr).unwrap();
+            let (mut slot, shared) = slot(SimBus::new().with_chip(chip), &config(t, None));
+            assert!(sim(&shared, |s| s.set_ready(addr, false)));
+            let err = slot.with(|_| Ok(())).unwrap_err();
+            assert_eq!(err.code, StatusCode::Unavailable, "{t:?} connected with no sample");
+            assert!(!slot.connected && slot.lost.is_some(), "{t:?}");
+            sim(&shared, |s| s.set_ready(addr, true));
+            slot.with(|_| Ok(())).unwrap();
+            assert!(slot.connected && slot.lost.is_none(), "{t:?}");
+        }
+    }
+
+    #[test]
     fn a_lost_board_is_tried_again_and_recovers() {
         let (mut slot, shared) = slot(buttons([0, 1, 0]), &config(BoardType::Buttons, None));
         sim(&shared, |s| s.set_present(Kind::Buttons.default_address(), false));
