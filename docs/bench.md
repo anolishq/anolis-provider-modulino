@@ -19,8 +19,10 @@ checklist has the table), and how each reports an address nobody answers is
 one of the open questions. A Pi 3 A+ uses the same driver as the Pi 4 B, so a
 run there repeats it on a slower host with less memory.
 
-The runtime is released for 64-bit Linux only (`linux-arm64`), so each Pi needs
-the 64-bit Raspberry Pi OS.
+Each Pi needs the 64-bit Raspberry Pi OS based on Debian 13 (Trixie). The
+runtime is released for 64-bit Linux only (`linux-arm64`), and its 0.16.0
+binary needs glibc 2.38 (`objdump -T bin/anolis-runtime` lists `GLIBC_2.38`),
+newer than Debian 12 (Bookworm) ships.
 
 ## Order, on each host
 
@@ -35,7 +37,9 @@ the 64-bit Raspberry Pi OS.
 ## Set up
 
 On the Pi, with I2C enabled and Rust 1.85 or later (the driver checklist's
-setup steps 1 and 2 cover both):
+setup steps 1 and 2 cover both; on Trixie, `sudo apt install cargo` gives
+1.85). The provider uses Rust edition 2024, which needs 1.85; CI builds it
+only with the current stable Rust, so 1.85 itself is untried.
 
 ```bash
 git clone https://github.com/anolishq/anolis-provider-modulino
@@ -43,10 +47,16 @@ cd anolis-provider-modulino
 cargo build --release --locked
 ```
 
-If the build runs out of memory (the Pi 3 A+ has 512 MB), build on the Pi 5
-with `just release` and copy
-`target/aarch64-unknown-linux-musl/release/anolis-provider-modulino`, which is
-static, into this clone's `target/release/` on the smaller Pi.
+If the build runs out of memory (the Pi 3 A+ has 512 MB), build a static
+binary on the Pi 5 instead. That needs rustup, not apt's cargo:
+
+```bash
+rustup target add aarch64-unknown-linux-musl
+cargo build --release --locked --target aarch64-unknown-linux-musl
+```
+
+and copy `target/aarch64-unknown-linux-musl/release/anolis-provider-modulino`
+into the smaller Pi's clone, at `target/release/`.
 
 The runtime, from its release, into this clone:
 
@@ -56,6 +66,7 @@ curl -fsSLO https://github.com/anolishq/anolis/releases/download/v$ANOLIS/anolis
 curl -fsSL -o anolis.SHA256SUMS https://github.com/anolishq/anolis/releases/download/v$ANOLIS/SHA256SUMS
 sha256sum -c --ignore-missing anolis.SHA256SUMS
 tar -xzf anolis-$ANOLIS-linux-arm64.tar.gz   # bin/anolis-runtime
+bin/anolis-runtime --version                 # fails here on a too-old OS
 ```
 
 ## All boards
@@ -69,8 +80,9 @@ tar -xzf anolis-$ANOLIS-linux-arm64.tar.gz   # bin/anolis-runtime
    i2cdetect -y -a 1 0x01 0x77
    ```
 
-   Compare them with `config/bench.yaml`, and give an `address` to any board
-   found away from its factory address there.
+   Compare them with the comment at the top of `config/bench.yaml`, and give
+   an `address` to any board found away from its factory address, except the
+   Thermo, which the provider finds at either of its two.
 3. Check the host and the config:
 
    ```bash
@@ -92,16 +104,28 @@ tar -xzf anolis-$ANOLIS-linux-arm64.tar.gz   # bin/anolis-runtime
    scripts/bench.py
    ```
 
-   It reads every board and calls every function, saying what to look for,
-   and asks what you saw. It pauses to swap the DC motors for the stepper and
-   back. Then it turns outputs on, runs the runtime's software stop
-   (`POST /v0/estop`), and asks whether everything went off. Last, it asks you
-   to unplug and replug, one at a time, the Buttons board and the three
-   sensors: the first reading after each replug must be a real one, not
-   zeros ([#7](https://github.com/anolishq/anolis-provider-modulino/issues/7)).
-   Answers go into `target/bench-results.md`.
-6. Stop the runtime with Ctrl-C. The provider then puts every output in its
-   safe state again: check that.
+   It asks what you saw at each step, and writes the answers to
+   `target/bench-results.md`:
+   - It reads every board and calls every function, saying what to look for.
+     It pauses to swap the DC motors for the stepper and back.
+   - It turns the outputs on, runs the runtime's software stop
+     (`POST /v0/estop`), and asks whether everything went off.
+   - It asks you to unplug and replug, one at a time, the Buttons board and
+     the three sensors. The first reading after each replug must be a real
+     one, not zeros
+     ([#7](https://github.com/anolishq/anolis-provider-modulino/issues/7)).
+   - It turns the outputs on again with the stepper holding, and asks you to
+     stop the runtime with Ctrl-C. The provider's own stop must then turn
+     everything off and let the stepper go free.
+
+   If the script stops early (Ctrl-C in its terminal, or an error), it runs
+   the software stop before it exits. If it cannot, run
+   `curl -s -X POST http://127.0.0.1:8080/v0/estop`, or stop the runtime.
+
+   `GET /v0/runtime/status` lists eight actuating functions (`tone`,
+   `set_speeds`, and others) as uncovered by the software stop. With hooks,
+   the runtime counts only the functions a hook calls; the hooks turn off what
+   those functions turn on.
 
 ## Hub step
 
@@ -130,3 +154,8 @@ When the Motors board's mode cannot be read at stop, the provider sends the
 stop and then the release. The tests check that the release is sent, but not
 that the stop went first, and a bench cannot produce a read that fails while
 writes still land. That stays unverified.
+
+The script swaps the motors with the board powered, after it stopped them
+(`stop`, or `set_mode dc`). Whether the firmware ignores a stepper command
+in DC mode, and the reverse, is read from the firmware source by
+modulino-driver, not measured.

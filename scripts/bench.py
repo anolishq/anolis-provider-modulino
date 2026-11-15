@@ -6,10 +6,14 @@
 For each board the runtime lists under the provider: read every signal, then
 call each function with the arguments in CALLS. After each step it asks what
 you saw, and writes every answer to a Markdown results file. Then it runs
-the runtime's software stop with the outputs on, and takes each --unplug
-board off the bus and puts it back. --no-prompt runs the calls and the stop,
-skips the unplugging, and records nothing observed: a check of the script
-and the configs against mock mode.
+the runtime's software stop with the outputs on, takes each --unplug board
+off the bus and puts it back, and leaves outputs on for the provider's own
+stop when the runtime is stopped. --no-prompt runs the calls and the
+software stop, skips the rest, and records nothing observed: a check of the
+script and the configs against mock mode.
+
+If the script stops early (Ctrl-C, an error), it runs the software stop
+before it exits.
 
 Uses only the standard library, so it runs on the bench host as is.
 """
@@ -47,8 +51,8 @@ CALLS: dict[str, list[tuple[str, dict, str]]] = {
         ("set_all", {"red": 0, "green": 0, "blue": 255, "brightness": 20}, "all 8 LEDs blue"),
         ("off", {}, "all LEDs off"),
     ],
-    "knob": [("set_position", {"position": 0}, "the next position read is 0")],
-    "joystick": [("set_deadzone", {"deadzone": 26}, "the centre reads 0 on both axes")],
+    "knob": [("set_position", {"position": 0}, "nothing yet: the read after shows it")],
+    "joystick": [("set_deadzone", {"deadzone": 100}, "nothing yet: the read after shows it")],
     "opto_relay": [("set", {"on": True}, "the relay closes (click, or continuity)")],
     "latch_relay": [
         ("set", {"on": True}, "the relay latches on"),
@@ -82,6 +86,12 @@ INPUTS: dict[str, str] = {
     "movement": "hold the board still and flat",
 }
 
+# What to do after a board's calls, before reading it again.
+AFTER: dict[str, str] = {
+    "knob": "leave the knob where it is (position should read 0)",
+    "joystick": "push the stick a little off centre (with a deadzone of 100, it should read 0)",
+}
+
 # Outputs left on for the software stop: each has a hook in
 # config/bench-runtime.yaml.
 STOP_SETUP: list[tuple[str, str, dict]] = [
@@ -91,8 +101,20 @@ STOP_SETUP: list[tuple[str, str, dict]] = [
     ("latch_relay", "set", {"on": True}),
     ("led_matrix", "show_mono", {"pixels": bytes([0xFF] * 12)}),
     ("buzzer", "tone", {"frequency_hz": 440, "duration_ms": 0}),
+    ("vibro", "vibrate", {"duration_ms": 60000, "power": 50}),
     ("motors", "set_mode", {"mode": "dc"}),
     ("motors", "set_speeds", {"a": 8000, "b": 8000}),
+]
+
+# Outputs left on for the provider's own stop when the runtime stops: the
+# same, but the motors in stepper mode with the coils held, so the provider's
+# safe state has to read the mode and release them.
+PROVIDER_STOP_SETUP: list[tuple[str, str, dict]] = [
+    entry for entry in STOP_SETUP if entry[0] != "motors"
+] + [
+    ("motors", PAUSE, {"text": "Swap the DC motors for the stepper again"}),
+    ("motors", "set_mode", {"mode": "stepper"}),
+    ("motors", "step", {"steps": 50, "period_ticks": 100}),
 ]
 
 
@@ -103,6 +125,7 @@ class Bench:
         self.prompt = prompt
         self.rows: list[tuple[str, str, str, str]] = []
         self.caps: dict[str, dict] = {}
+        self.stopped = False
 
     def http(self, method: str, path: str, body: dict | None = None) -> dict:
         data = None if body is None else json.dumps(body).encode()
@@ -113,7 +136,12 @@ class Bench:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.load(response)
         except urllib.error.HTTPError as e:
-            return json.load(e)
+            try:
+                return json.load(e)
+            except ValueError:
+                return {"status": {"code": f"HTTP {e.code}", "message": e.reason}}
+        except urllib.error.URLError as e:
+            raise SystemExit(f"cannot reach the runtime at {self.url}: {e.reason}") from None
 
     def ask(self, question: str) -> str:
         if not self.prompt:
@@ -146,17 +174,23 @@ class Bench:
                 "args": self.typed(function, args),
             },
         )
-        status = reply.get("status", {})
+        status = reply.get("status", {"code": "?", "message": reply.get("error", "")})
         return status.get("code", "?") + ("" if status.get("code") == "OK" else f": {status.get('message', '')}")
 
-    def read(self, device: str) -> tuple[str, str]:
+    def read(self, device: str) -> tuple[bool, str]:
+        """Whether the runtime has readings for the device, and them.
+
+        The runtime answers from its cache with status OK either way: a device
+        it cannot reach has quality UNAVAILABLE and no values."""
         state = self.http("GET", f"/v0/state/{self.provider}/{device}")
+        quality = state.get("quality", state.get("status", {}).get("code", "?"))
         values = []
         for v in state.get("values", []):
             value = v["value"]
             shown = value.get(value["type"], value)
             values.append(f"{v['signal_id']}={shown} ({v['quality']})")
-        return state.get("status", {}).get("code", "?"), ", ".join(values)
+        present = quality == "OK" and bool(values)
+        return present, f"{quality}: {', '.join(values) or 'no values'}"
 
     def run(self, unplug: list[str]) -> None:
         status = self.http("GET", "/v0/runtime/status")
@@ -171,14 +205,14 @@ class Bench:
             self.caps[device] = self.http("GET", f"/v0/devices/{self.provider}/{device}/capabilities")
             print(f"\n== {device} ({kind})")
             if self.caps[device]["capabilities"]["signals"]:
-                code, values = self.read(device)
-                print(f"  read: {code}: {values}")
-                self.record("read", device, f"{code}: {values}", self.ask("Plausible readings?"))
+                _, values = self.read(device)
+                print(f"  read: {values}")
+                self.record("read", device, values, self.ask("Plausible readings?"))
             if kind in INPUTS:
                 self.ask(f"Now {INPUTS[kind]}, then press Enter.")
-                code, values = self.read(device)
-                print(f"  read: {code}: {values}")
-                self.record("read with input", device, f"{code}: {values}", self.ask("Did the readings follow?"))
+                _, values = self.read(device)
+                print(f"  read: {values}")
+                self.record("read with input", device, values, self.ask("Did the readings follow?"))
             for name, args, expect in CALLS.get(kind, []):
                 if name == PAUSE:
                     self.ask(f"{expect}, then press Enter.")
@@ -186,12 +220,17 @@ class Bench:
                 result = self.call(device, name, args)
                 print(f"  {name}: {result}. Look for: {expect}")
                 self.record(f"call {name}", device, result, self.ask("Seen?"))
+            if kind in AFTER:
+                self.ask(f"Now {AFTER[kind]}, then press Enter.")
+                _, values = self.read(device)
+                print(f"  read: {values}")
+                self.record("read after calls", device, values, self.ask("As expected?"))
 
         print("\n== software stop")
         for kind, name, args in STOP_SETUP:
             if kind in by_type:
                 print(f"  {by_type[kind]}.{name}: {self.call(by_type[kind], name, args)}")
-        self.ask("Outputs on as set up (LEDs, relays, matrix, tone, motors)? Enter to stop them.")
+        self.ask("Outputs on as set up (LEDs, relays, matrix, tone, vibration, motors)? Enter to stop them.")
         stop = self.http("POST", "/v0/estop")
         failed = [f"{a['device_handle']}.{a['function']}" for a in stop.get("actions", []) if not a.get("success")]
         result = f"achieved={stop.get('safe_state_achieved')}, failed={failed or 'none'}"
@@ -206,21 +245,48 @@ class Bench:
                 continue
             print(f"\n== {device} off the bus and back")
             self.ask(f"Unplug {device}, then press Enter.")
-            self.record("unplugged", device, self.wait(device, want_ok=False), self.ask("Anything else on the bus affected?"))
+            self.record("unplugged", device, self.wait(device, present=False), self.ask("Anything else on the bus affected?"))
             self.ask(f"Plug {device} back in, then press Enter.")
-            first = self.wait(device, want_ok=True)
+            first = self.wait(device, present=True)
             self.record("plugged back", device, first, self.ask("First readings plausible, not zeros?"))
 
-    def wait(self, device: str, want_ok: bool) -> str:
+        if self.prompt:
+            print("\n== the provider's own stop")
+            for kind, name, args in PROVIDER_STOP_SETUP:
+                if kind not in by_type:
+                    continue
+                if name == PAUSE:
+                    self.ask(f"{args['text']}, then press Enter.")
+                    continue
+                print(f"  {by_type[kind]}.{name}: {self.call(by_type[kind], name, args)}")
+            self.ask(
+                "Outputs on again, the stepper holding. Stop the runtime with Ctrl-C in its terminal"
+                " (the stepper should go free by hand), then press Enter."
+            )
+            self.stopped = True
+            self.record("runtime stopped", "all", "the provider's stop at session end", self.ask("Every output off?"))
+
+    def wait(self, device: str, present: bool) -> str:
+        """Poll until the device's readings are gone, or back. Back, the first
+        readings seen are the ones the runtime took on reconnecting: this polls
+        every 100 ms, faster than the runtime's polling interval."""
         deadline = time.monotonic() + 15
         while True:
-            code, values = self.read(device)
-            reached = (code == "OK") == want_ok
-            if reached or time.monotonic() > deadline:
-                result = f"{code}: {values}" + ("" if reached else " (still so after 15 s)")
+            now_present, values = self.read(device)
+            if now_present == present or time.monotonic() > deadline:
+                result = values + ("" if now_present == present else " (still so after 15 s)")
                 print(f"  read: {result}")
                 return result
-            time.sleep(0.5)
+            time.sleep(0.1)
+
+    def abort(self) -> None:
+        """Outputs off after an early stop: the software stop, then its latch
+        released, so a later run does not start latched."""
+        print("\nstopped early: running the software stop")
+        stop = self.http("POST", "/v0/estop")
+        print(f"  estop: achieved={stop.get('safe_state_achieved')}")
+        self.http("POST", "/v0/estop/clear")
+        self.record("stopped early", "all", f"software stop achieved={stop.get('safe_state_achieved')}", "")
 
     def report(self) -> str:
         lines = [
@@ -247,10 +313,8 @@ def host() -> str:
 
 def adapter() -> str:
     # As modulino-driver's bench checklist records it (its setup step 4).
-    try:
-        return Path("/sys/bus/i2c/devices/i2c-1/../driver").resolve().name
-    except OSError:
-        return "unknown"
+    driver = Path("/sys/bus/i2c/devices/i2c-1/../driver")
+    return driver.resolve().name if driver.exists() else "unknown"
 
 
 def main() -> int:
@@ -269,6 +333,10 @@ def main() -> int:
     bench = Bench(options.url, options.provider, prompt=not options.no_prompt)
     try:
         bench.run(options.unplug)
+    except BaseException:
+        if not bench.stopped:
+            bench.abort()
+        raise
     finally:
         options.out.parent.mkdir(parents=True, exist_ok=True)
         options.out.write_text(bench.report())
