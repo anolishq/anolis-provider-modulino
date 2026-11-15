@@ -161,11 +161,28 @@ impl DeviceConfig {
     }
 }
 
-/// What the schema cannot say.
+/// Where a board sits: on the bus (`None`), or a hub's address and port.
+type Segment = Option<(u8, u8)>;
+
+/// The addresses a board may answer at: its configured one, else its
+/// defaults. Thermo finds its sensor at 0x44 or 0x45, and Movement with no
+/// address tries 0x6A and then 0x6B, so each holds both.
+fn addresses(device: &DeviceConfig) -> Vec<u8> {
+    match (device.r#type, device.address) {
+        (_, Some(a)) => vec![a],
+        (BoardType::Thermo, None) => vec![0x44, 0x45],
+        (BoardType::Movement, None) => vec![0x6A, 0x6B],
+        (t, None) => t.default_address().into_iter().collect(),
+    }
+}
+
+/// What the schema cannot say: unique ids, and no two boards a transfer could
+/// reach at once. A hub port, while selected, is joined to the bus, so a board
+/// behind a port shares the bus's addresses (modulino-driver
+/// `docs/design.md`, section 4.8) and every hub's own address. Two different
+/// ports are never selected together, so they may repeat an address.
 pub fn check(config: &Config) -> Result<(), BoxError> {
     let mut ids = HashSet::new();
-    let mut taken = HashSet::new();
-    let hubs: HashSet<u8> = config.devices.iter().filter_map(|d| d.hub.map(|h| h.address)).collect();
     for device in &config.devices {
         if !ids.insert(&device.id) {
             return Err(format!("device id {:?} is configured twice", device.id).into());
@@ -177,32 +194,109 @@ pub fn check(config: &Config) -> Result<(), BoxError> {
             )
             .into());
         }
+    }
+    let hubs: HashSet<u8> = config.devices.iter().filter_map(|d| d.hub.map(|h| h.address)).collect();
+    let mut taken: Vec<(Segment, u8, &str)> = Vec::new();
+    for device in &config.devices {
         let segment = device.hub.map(|h| (h.address, h.port));
-        let addresses: Vec<u8> = match (device.r#type, device.address) {
-            (_, Some(a)) => vec![a],
-            (BoardType::Thermo, None) => vec![0x44, 0x45],
-            (t, None) => t.default_address().into_iter().collect(),
-        };
-        for address in addresses {
-            if !taken.insert((segment, address)) {
+        for address in addresses(device) {
+            if hubs.contains(&address) {
+                return Err(format!("device {:?}: {address:#04x} is a hub's address", device.id).into());
+            }
+            let clash = taken
+                .iter()
+                .find(|(other, a, _)| *a == address && (*other == segment || other.is_none() || segment.is_none()));
+            if let Some((other, _, id)) = clash {
                 return Err(format!(
-                    "device {:?}: another device is already at {address:#04x}{}",
+                    "device {:?} at {address:#04x}{} would answer with {id:?} at {address:#04x}{}",
                     device.id,
-                    on_segment(segment)
+                    on_segment(segment),
+                    on_segment(*other)
                 )
                 .into());
             }
-            if segment.is_none() && hubs.contains(&address) {
-                return Err(format!("device {:?}: {address:#04x} is a hub's address on the bus", device.id).into());
-            }
+            taken.push((segment, address, &device.id));
         }
     }
     Ok(())
 }
 
-fn on_segment(segment: Option<(u8, u8)>) -> String {
+fn on_segment(segment: Segment) -> String {
     match segment {
         None => " on the bus".to_owned(),
         Some((hub, port)) => format!(" on port {port} of the hub at {hub:#04x}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(id: &str, t: BoardType, address: Option<u8>, hub: Option<(u8, u8)>) -> DeviceConfig {
+        DeviceConfig {
+            id: id.into(),
+            r#type: t,
+            label: None,
+            address,
+            hub: hub.map(|(address, port)| HubConfig { address, port }),
+        }
+    }
+
+    fn checked(devices: Vec<DeviceConfig>) -> Result<(), String> {
+        check(&Config { bus: default_bus(), mock: true, devices }).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn a_device_id_used_twice_is_refused() {
+        let e = checked(vec![device("a", BoardType::Buttons, None, None), device("a", BoardType::Buzzer, None, None)])
+            .unwrap_err();
+        assert!(e.contains("configured twice"), "{e}");
+    }
+
+    #[test]
+    fn the_same_address_on_the_bus_and_behind_a_port_is_refused() {
+        let e = checked(vec![
+            device("up", BoardType::OptoRelay, None, None),
+            device("down", BoardType::OptoRelay, None, Some((0x70, 1))),
+        ])
+        .unwrap_err();
+        assert!(e.contains("would answer with"), "{e}");
+    }
+
+    #[test]
+    fn the_same_address_on_two_ports_is_accepted() {
+        checked(vec![
+            device("left", BoardType::OptoRelay, None, Some((0x70, 0))),
+            device("right", BoardType::OptoRelay, None, Some((0x70, 1))),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn a_board_at_a_hubs_address_is_refused_on_any_segment() {
+        for hub in [None, Some((0x70, 3))] {
+            let e = checked(vec![
+                device("behind", BoardType::Buttons, None, Some((0x71, 0))),
+                device("odd", BoardType::Buttons, Some(0x71), hub),
+            ])
+            .unwrap_err();
+            assert!(e.contains("hub's address"), "{e}");
+        }
+    }
+
+    #[test]
+    fn movement_without_an_address_holds_both_of_its_defaults() {
+        let e = checked(vec![
+            device("imu", BoardType::Movement, None, None),
+            device("clash", BoardType::Buttons, Some(0x6B), None),
+        ])
+        .unwrap_err();
+        assert!(e.contains("0x6b"), "{e}");
+    }
+
+    #[test]
+    fn a_thermo_address_is_refused() {
+        let e = checked(vec![device("t", BoardType::Thermo, Some(0x44), None)]).unwrap_err();
+        assert!(e.contains("found, not configured"), "{e}");
     }
 }

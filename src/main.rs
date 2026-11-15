@@ -34,6 +34,9 @@ use crate::config::{BoardType, Config};
 struct Slot {
     board: Board,
     connected: bool,
+    /// The board has been connected and its outputs made safe once. Later
+    /// connects, after it was lost, leave its outputs as commanded.
+    made_safe: bool,
     /// Why the board was last found unreachable, while it still is.
     lost: Option<String>,
 }
@@ -55,10 +58,28 @@ impl Slot {
     /// and record it unreachable when it does not answer.
     fn with<T>(&mut self, op: impl FnOnce(&mut Board) -> Result<T, Failure>) -> Result<T, ProviderError> {
         if !self.connected {
-            self.run(Board::connect)?;
+            let first = !self.made_safe;
+            self.run(|b| {
+                b.setup()?;
+                if first {
+                    b.make_safe()?;
+                }
+                Ok(())
+            })?;
             self.connected = true;
+            self.made_safe = true;
         }
         self.run(op)
+    }
+
+    /// At session end, whatever state the board was last in: a board that is
+    /// not connected is verified first, so nothing is sent to an address that
+    /// may hold another device, then its outputs are made safe.
+    fn finish(&mut self) -> Result<(), Failure> {
+        if !self.connected {
+            self.board.setup()?;
+        }
+        self.board.stop()
     }
 
     fn run<T>(&mut self, op: impl FnOnce(&mut Board) -> Result<T, Failure>) -> Result<T, ProviderError> {
@@ -120,7 +141,7 @@ fn simulated(config: &Config) -> SimBus {
 
 fn open(config: &Config) -> Result<Bus, BoxError> {
     if config.mock {
-        return Ok(Bus::Sim(Box::new(simulated(config))));
+        return Ok(Bus::Sim(simulated(config)));
     }
     let dev = I2cdev::new(&config.bus).map_err(|e| format!("cannot open {}: {e}", config.bus))?;
     Ok(Bus::Linux(dev))
@@ -169,7 +190,12 @@ impl Provider for ModulinoProvider {
                 device = device.tag("hub", format!("{:#04x}", h.address)).tag("hub_port", h.port.to_string());
             }
             devices.push(device);
-            slots.push(Slot { board: Board::new(d, Route::new(&bus, d.via())), connected: false, lost: None });
+            slots.push(Slot {
+                board: Board::new(d, Route::new(&bus, d.via())),
+                connected: false,
+                made_safe: false,
+                lost: None,
+            });
         }
         Ok(Self { devices, slots })
     }
@@ -208,15 +234,13 @@ impl Provider for ModulinoProvider {
         self.slots[index].lost.as_ref().map(|why| DeviceHealth::new(DeviceState::Unreachable, why.clone()))
     }
 
-    /// The session is ending, however it ended: every connected board's
-    /// outputs to their safe state. A board that does not answer is logged
-    /// and skipped, and the others are still made safe.
+    /// The session is ending, however it ended: every board's outputs to their
+    /// safe state, including a board that was lost or never answered, which
+    /// is tried once more. A board that does not answer is logged and
+    /// skipped, and the others are still made safe.
     fn stop(&mut self) {
         for (device, slot) in self.devices.iter().zip(&mut self.slots) {
-            if !slot.connected {
-                continue;
-            }
-            match slot.board.stop() {
+            match slot.finish() {
                 Ok(()) => {}
                 Err(Failure::Unreachable(why)) => {
                     eprintln!("{}: WARNING {} not made safe: {why}", Self::NAME, device.id())
@@ -240,6 +264,31 @@ mod tests {
     use anolis_provider_sdk::StatusCode;
     use modulino_driver::Kind;
 
+    type Shared = Arc<Mutex<Bus>>;
+
+    fn config(t: BoardType, hub: Option<HubConfig>) -> DeviceConfig {
+        DeviceConfig { id: "d0".into(), r#type: t, label: None, address: None, hub }
+    }
+
+    fn slot(bus: SimBus, config: &DeviceConfig) -> (Slot, Shared) {
+        let shared = Arc::new(Mutex::new(Bus::Sim(bus)));
+        let slot = Slot {
+            board: Board::new(config, Route::new(&shared, config.via())),
+            connected: false,
+            made_safe: false,
+            lost: None,
+        };
+        (slot, shared)
+    }
+
+    /// Run `f` on the simulated bus inside the shared bus.
+    fn sim<R>(shared: &Shared, f: impl FnOnce(&mut SimBus) -> R) -> R {
+        match &mut *shared.lock().unwrap() {
+            Bus::Sim(sim) => f(sim),
+            Bus::Linux(_) => unreachable!("tests run on the simulated bus"),
+        }
+    }
+
     /// A Buttons board at its default address, with buttons pressed as given.
     fn buttons(pressed: [u8; 3]) -> SimBus {
         let mut bus = SimBus::new().with_node(Kind::Buttons);
@@ -247,23 +296,33 @@ mod tests {
         bus
     }
 
-    fn buttons_config(hub: Option<HubConfig>) -> DeviceConfig {
-        DeviceConfig { id: "b0".into(), r#type: BoardType::Buttons, label: None, address: None, hub }
-    }
-
-    fn slot(bus: SimBus, config: &DeviceConfig) -> Slot {
-        let bus = Arc::new(Mutex::new(Bus::Sim(Box::new(bus))));
-        Slot { board: Board::new(config, Route::new(&bus, config.via())), connected: false, lost: None }
-    }
-
     fn hub(port: u8, bus: SimBus) -> SimBus {
         let hub = Address::new(0x70).and_then(SimHub::new).expect("0x70 is a hub address");
         SimBus::new().with_hub(hub.with_port(port, bus))
     }
 
+    /// Switch the relay through its driver. The SDK's `Args` cannot be built
+    /// outside the SDK, so `Board::call` is covered by the harness instead.
+    fn set_relay(slot: &mut Slot, on: bool) {
+        slot.with(|b| match b {
+            Board::OptoRelay(r) => r.set(on).map_err(Failure::from),
+            _ => unreachable!("an opto relay"),
+        })
+        .unwrap();
+    }
+
+    fn relay_frame(shared: &Shared) -> Option<Vec<u8>> {
+        sim(shared, |s| s.last_write(Kind::OptoRelay.default_address()).map(<[u8]>::to_vec))
+    }
+
+    fn relay_present(shared: &Shared, present: bool) {
+        sim(shared, |s| assert!(s.set_present(Kind::OptoRelay.default_address(), present)));
+    }
+
     #[test]
     fn a_board_behind_a_hub_port_is_read_through_it() {
-        let mut slot = slot(hub(2, buttons([1, 0, 1])), &buttons_config(Some(HubConfig { address: 0x70, port: 2 })));
+        let (mut slot, _) =
+            slot(hub(2, buttons([1, 0, 1])), &config(BoardType::Buttons, Some(HubConfig { address: 0x70, port: 2 })));
         let read = slot.with(|b| b.read(&["a", "b", "c"])).unwrap();
         assert_eq!(read["a"].value, true.into());
         assert_eq!(read["b"].value, false.into());
@@ -273,7 +332,8 @@ mod tests {
 
     #[test]
     fn a_board_on_another_port_is_unreachable_not_a_fault() {
-        let mut slot = slot(hub(2, buttons([0, 0, 0])), &buttons_config(Some(HubConfig { address: 0x70, port: 3 })));
+        let (mut slot, _) =
+            slot(hub(2, buttons([0, 0, 0])), &config(BoardType::Buttons, Some(HubConfig { address: 0x70, port: 3 })));
         let err = slot.with(|b| b.read(&["a"])).unwrap_err();
         assert_eq!(err.code, StatusCode::Unavailable);
         assert!(!slot.connected && slot.lost.is_some());
@@ -281,14 +341,61 @@ mod tests {
 
     #[test]
     fn a_lost_board_is_tried_again_and_recovers() {
-        let mut slot = slot(SimBus::new(), &buttons_config(None));
-        assert!(slot.with(|b| b.read(&["a"])).is_err());
+        let (mut slot, shared) = slot(buttons([0, 1, 0]), &config(BoardType::Buttons, None));
+        sim(&shared, |s| s.set_present(Kind::Buttons.default_address(), false));
+        assert!(slot.with(|b| b.read(&["b"])).is_err());
         assert!(slot.lost.is_some());
-        // Put the board on the bus: the next read connects it again.
-        let bus = Arc::new(Mutex::new(Bus::Sim(Box::new(buttons([0, 1, 0])))));
-        slot.board = Board::new(&buttons_config(None), Route::new(&bus, None));
+        sim(&shared, |s| s.set_present(Kind::Buttons.default_address(), true));
         let read = slot.with(|b| b.read(&["b"])).unwrap();
         assert_eq!(read["b"].value, true.into());
         assert!(slot.lost.is_none() && slot.connected);
+    }
+
+    #[test]
+    fn the_first_connect_makes_outputs_safe() {
+        let (mut slot, shared) = slot(SimBus::new().with_node(Kind::OptoRelay), &config(BoardType::OptoRelay, None));
+        assert_eq!(relay_frame(&shared), None, "nothing written before connect");
+        slot.with(|_| Ok(())).unwrap();
+        let safe = relay_frame(&shared).expect("connect writes the safe state");
+        set_relay(&mut slot, true);
+        assert_ne!(relay_frame(&shared).unwrap(), safe);
+        set_relay(&mut slot, false);
+        assert_eq!(relay_frame(&shared).unwrap(), safe, "the frame connect wrote is the off frame");
+    }
+
+    #[test]
+    fn a_reconnect_keeps_a_commanded_output() {
+        let (mut slot, shared) = slot(SimBus::new().with_node(Kind::OptoRelay), &config(BoardType::OptoRelay, None));
+        set_relay(&mut slot, true);
+        let on = relay_frame(&shared).unwrap();
+        relay_present(&shared, false);
+        assert!(slot.with(|b| b.read(&["on"])).is_err());
+        relay_present(&shared, true);
+        let read = slot.with(|b| b.read(&["on"])).unwrap();
+        assert_eq!(read["on"].value, true.into(), "the relay stays on after a missed transfer");
+        assert_eq!(relay_frame(&shared).unwrap(), on);
+    }
+
+    #[test]
+    fn stop_makes_safe_a_board_lost_during_the_session() {
+        let (mut slot, shared) = slot(SimBus::new().with_node(Kind::OptoRelay), &config(BoardType::OptoRelay, None));
+        slot.with(|_| Ok(())).unwrap();
+        let off = relay_frame(&shared).unwrap();
+        set_relay(&mut slot, true);
+        relay_present(&shared, false);
+        assert!(slot.with(|b| b.read(&["on"])).is_err());
+        relay_present(&shared, true);
+        assert!(slot.finish().is_ok());
+        assert_eq!(relay_frame(&shared).unwrap(), off, "stop switched the relay off");
+    }
+
+    #[test]
+    fn stop_makes_safe_a_board_absent_at_start() {
+        let (mut slot, shared) = slot(SimBus::new().with_node(Kind::OptoRelay), &config(BoardType::OptoRelay, None));
+        relay_present(&shared, false);
+        assert!(slot.with(|_| Ok(())).is_err());
+        relay_present(&shared, true);
+        assert!(slot.finish().is_ok());
+        assert!(relay_frame(&shared).is_some(), "stop reached the board and wrote its safe state");
     }
 }

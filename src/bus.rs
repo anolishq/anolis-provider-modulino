@@ -10,14 +10,17 @@ use embedded_hal::delay::DelayNs;
 use embedded_hal::i2c::{self, ErrorKind, ErrorType, I2c, NoAcknowledgeSource, Operation};
 use linux_embedded_hal::I2cdev;
 use linux_embedded_hal::i2cdev::linux::LinuxI2CError;
+use modulino_driver::sim::SimBus;
 use modulino_driver::{Address, Hub};
 
 /// `EREMOTEIO`: what the Raspberry Pi's I2C controllers (i2c-bcm2835 on a Pi
 /// 4, i2c-designware on a Pi 5) return for an address nothing acknowledges.
 /// linux-embedded-hal 0.5 maps only `ENXIO` and `ENODEV` to a NACK and
-/// reports this one as `Other`, so a missing board would read as a bus fault
-/// rather than as unreachable. Read from the drivers' source; the
-/// modulino-driver bench checklist (step 1.1) measures it on hardware.
+/// reports this one as `Other`. modulino-driver acts on a NACK specifically:
+/// the SHT31 Thermo path retries a NACKed read while a measurement runs, and
+/// identity checks report a NACK differently from other failures. Read from
+/// the kernel drivers' source; the modulino-driver bench checklist (step 1.1)
+/// measures it on hardware.
 const EREMOTEIO: i32 = 121;
 
 /// A bus error, kept as its `embedded-hal` kind and a message for the log.
@@ -58,26 +61,11 @@ impl i2c::Error for BusError {
     }
 }
 
-/// The bus the provider opened: the Linux I2C device, or simulated boards in
-/// mock mode.
+/// The bus the provider opened: the Linux I2C device, or modulino-driver's
+/// simulated boards in mock mode.
 pub enum Bus {
     Linux(I2cdev),
-    Sim(Box<dyn SimI2c>),
-}
-
-/// The simulated bus mock mode uses, behind a trait object so this module
-/// does not depend on its concrete type.
-pub trait SimI2c: Send {
-    fn sim_transaction(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), BusError>;
-}
-
-impl<T> SimI2c for T
-where
-    T: I2c + Send,
-{
-    fn sim_transaction(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), BusError> {
-        I2c::transaction(self, address, operations).map_err(|e| BusError::sim(&e))
-    }
+    Sim(SimBus),
 }
 
 impl ErrorType for Bus {
@@ -88,7 +76,7 @@ impl I2c for Bus {
     fn transaction(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), BusError> {
         match self {
             Bus::Linux(dev) => dev.transaction(address, operations).map_err(|e| BusError::linux(&e)),
-            Bus::Sim(sim) => sim.sim_transaction(address, operations),
+            Bus::Sim(sim) => sim.transaction(address, operations).map_err(|e| BusError::sim(&e)),
         }
     }
 }

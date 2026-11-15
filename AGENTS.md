@@ -23,9 +23,12 @@ top of modulino-driver, over a Linux I2C bus.
   section** (written for the Python SDK; the rules are the same). modulino-driver is the in-house driver for a vendor
   with no Rust driver: it lives in its own repository and is pinned here by commit until it is tagged.
 - **Mock mode runs the real driver** on modulino-driver's `sim::SimBus`. Never stub the driver.
-- **Only a board that does not answer is UNREACHABLE.** `classify` in `src/board.rs`: a bus error, a wrong identity
-  or chip, or a timeout marks the board lost and it is retried; any other driver error is answered with its status.
-- **Outputs: safe at connect and at stop.** `Board::make_safe`; the list is in `docs/boards.md`.
+- **UNREACHABLE is for the bus and the board's presence.** `classify` in `src/board.rs`: any bus error (a NACK, or a
+  fault on the bus itself), a wrong identity or chip, or a timeout marks the board lost and it is retried; any other
+  driver error is answered with its status.
+- **Outputs: safe at the first connect and at stop, for every board.** `Board::make_safe`; the list is in
+  `docs/boards.md`. A reconnect after a lost transfer runs `Board::setup` only, so a commanded output is not undone;
+  `Slot::finish` verifies a board that is not connected before making it safe at stop.
 - **Only what the config names.** No scanning, no address changes (that is modulino-driver's `service`, an operator
   step), no nested hubs.
 - **The board contract is public.** Signals and functions are what automation is written against: change them only
@@ -37,7 +40,12 @@ top of modulino-driver, over a Linux I2C bus.
   `Provider` must be. `Route` (`src/bus.rs`) owns the bus behind an `Arc<Mutex>` and builds the driver's `Hub` for
   the length of each transaction. Keep hub logic in the driver.
 - **`EREMOTEIO` is a NACK.** linux-embedded-hal 0.5 maps only `ENXIO`/`ENODEV` to `NoAcknowledge`; the Pi's I2C
-  controllers return `EREMOTEIO` (121). `BusError::linux` maps it, or an absent board would be a fault.
+  controllers return `EREMOTEIO` (121). `BusError::linux` maps it, because modulino-driver acts on a NACK
+  specifically (the SHT31 Thermo retries a NACKed read).
+- **A hub port is joined to the bus while selected.** `config::check` refuses a board behind a port at an address
+  used on the bus, and any board at a hub's address.
+- **`Args` cannot be built outside the SDK**, so unit tests reach the driver directly; `Board::call` is covered by
+  the harness on the first configured board.
 - **linux-embedded-hal with `default-features = false, features = ["i2c"]`.** Its defaults pull in serial and GPIO
   crates; `i2c` alone keeps the release binary static.
 - **The simulated Motors board always reads idle in dc mode** (a SimBus limit), so the stepper branch of

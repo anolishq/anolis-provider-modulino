@@ -12,7 +12,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   provider SDK: buttons, buzzer, vibro, pixels, knob, joystick, opto and latch
   relays, LED matrix, motors, thermo, pressure, light, movement and distance,
   on a Linux I2C bus or behind a Modulino Hub port. Each output is put in its
-  safe state at connect and when the session ends.
+  safe state the first time its board is connected and, for every board, when
+  the session ends.
 - Mock mode (`mock: true`) on modulino-driver's simulated boards. In it the
   provider passes the anolis-protocol 1.10.0 conformance harness at level 2,
   with four skips listed in `scripts/conformance.py`: no function declares

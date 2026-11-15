@@ -34,13 +34,15 @@ a `no_std` Rust driver for the boards, and talks to them over a Linux I2C bus.
 | `movement` | Movement: accelerometer and gyroscope (LSM6DSOX) | `0x6A`, else `0x6B` |
 | `distance` | Distance: time of flight (VL53L4CD or VL53L4ED) | `0x29` |
 
-Each board's signals and functions, and the state its outputs are put in when
-the provider connects and when it stops, are in [docs/boards.md](docs/boards.md).
+Each board's signals and functions, and the state its outputs are put in the
+first time the provider connects the board and when it stops, are in
+[docs/boards.md](docs/boards.md).
 
 A [Modulino Hub](https://docs.arduino.cc/hardware/modulinos/) (TCA9548A) on the
-bus gives each of its eight ports its own bus, so two boards with the same
-address can sit on two ports. Hubs must be directly on the bus: a hub behind
-another hub's port is not supported.
+bus switches eight ports. A port, while selected, is joined to the bus, so a
+board behind a port must not share an address with a board on the bus itself;
+two boards with the same address can sit on two different ports. Hubs must be
+directly on the bus: a hub behind another hub's port is not supported.
 
 ## Config
 
@@ -64,13 +66,14 @@ been changed (modulino-driver's `service` module does that; this provider never
 does). `mock: true` replaces the bus with modulino-driver's simulated boards, so
 the provider runs without hardware. The full schema:
 `anolis-provider-modulino --config-schema`. Beyond the schema, `--check-config`
-refuses a device id used twice, two boards on the same address of one bus or
-hub port, a board on a hub's address, and an `address` on a `thermo` board
-(which finds its own).
+refuses a device id used twice, two boards a transfer would reach at once (the
+same address on the bus, or on the bus and behind a hub port, or on one hub
+port), a board at a hub's address, and an `address` on a `thermo` board (which
+finds its own).
 
 A board that does not answer, answers as another kind of board, or does not
-finish starting is listed anyway and reported `UNREACHABLE`; the provider tries
-it again on its next read or call.
+finish starting, and a transfer that fails on the bus, are reported
+`UNREACHABLE`; the provider tries the board again on its next read or call.
 
 ## Develop
 

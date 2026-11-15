@@ -4,10 +4,14 @@ What each board type exposes to the runtime. Signals are read; functions are
 called with the arguments shown, which the SDK checks against their bounds
 before the provider sees them. Every signal is in the default read set unless
 marked *not default*. A test (`docs_list_every_signal_and_function` in
-`src/board.rs`) fails when this page and the declarations in the code disagree.
+`src/board.rs`) checks that each board's Signals line names exactly its declared
+signals, and its Functions line exactly its declared functions with their
+argument names; the types, ranges and descriptions here are not checked.
 
-**Safe state** is what the provider puts a board's outputs in when it connects
-the board and when its session ends (see [hardware.md](hardware.md)).
+**Safe state** is what the provider puts a board's outputs in the first time it
+connects the board, and again when its session ends (see
+[hardware.md](hardware.md)). A board that misses a transfer and is connected
+again keeps what it was last commanded.
 
 ## buttons
 
@@ -39,7 +43,7 @@ the board and when its session ends (see [hardware.md](hardware.md)).
 
 ## knob
 
-- Signals: `position` (int64), `pressed` (bool).
+- Signals: `position` (int64; wraps at -32768 and 32767), `pressed` (bool).
 - Functions: `set_position(position)` (-32768 to 32767, CONFIG): call the current
   position this value. The offset is kept by the provider, not the board, so it
   starts again from the board's count when the provider restarts.
@@ -58,7 +62,7 @@ the board and when its session ends (see [hardware.md](hardware.md)).
 
 ## latch_relay
 
-- Signals: `on` (bool). Quality `UNKNOWN` until the relay has been commanded
+- Signals: `on` (bool). Quality UNKNOWN until the relay has been commanded
   since the board powered up: the board does not report its contacts before
   then.
 - Functions: `set(on)` (ACTUATE). Takes 120 ms: the firmware pulses the coil,
@@ -70,7 +74,8 @@ the board and when its session ends (see [hardware.md](hardware.md)).
 
 ## led_matrix
 
-- Signals: `mode` (string: `mono` or `grayscale`).
+- Signals: `mode` (string: mono or grayscale): the mode the provider last read
+  or set, read from the board each time the board is connected.
 - Functions: `clear()` (ACTUATE), `show_mono(pixels)` (12 bytes, one bit per
   LED, row by row from the top left, most significant bit first; ACTUATE),
   `show_gray(levels)` (96 bytes, one level 0-15 per LED, row by row from the top
@@ -81,7 +86,7 @@ the board and when its session ends (see [hardware.md](hardware.md)).
 
 ## motors
 
-- Signals: `mode` (string: `dc` or `stepper`), `busy` (bool: a stepper move is
+- Signals: `mode` (string: dc or stepper), `busy` (bool: a stepper move is
   running), `current_a_raw`, `current_b_raw` (uint64, ADC counts above idle).
 - Functions: `set_speeds(a, b)` (-32767 to 32767 each, dc mode, ACTUATE; 0 is
   stopped, so the runtime's software stop can call it with 0), `stop()` (dc
@@ -90,6 +95,7 @@ the board and when its session ends (see [hardware.md](hardware.md)).
   afterwards; ACTUATE), `release_coils()` (stepper mode, ACTUATE),
   `set_mode(mode)` (`dc` or `stepper`, CONFIG).
 - Safe state: in dc mode, both motors stopped; in stepper mode, coils released.
+  If the board's mode cannot be read, both are sent.
 
 ## thermo
 
@@ -113,6 +119,7 @@ the board and when its session ends (see [hardware.md](hardware.md)).
 
 - Signals: `distance_mm`, `range_status` (uint64; status 0 is a valid
   measurement); `signal_kcps`, `sigma_mm` (uint64, *not default*). A read
-  returns the newest range, with the time it was measured.
+  returns the newest range, with the time it was measured; a range more than
+  1 s old is reported STALE.
 - Ranging starts when the provider connects the board and stops when its session
   ends.

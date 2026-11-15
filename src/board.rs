@@ -178,10 +178,21 @@ fn declare(t: BoardType) -> Arc<DeviceType> {
             .signal(sensor("gyro_y", ValueType::Double, "deg/s", "Angular velocity, Y"))
             .signal(sensor("gyro_z", ValueType::Double, "deg/s", "Angular velocity, Z")),
         BoardType::Distance => d
-            .signal(sensor("distance_mm", ValueType::Uint64, "mm", "Distance to the target"))
-            .signal(sensor("range_status", ValueType::Uint64, "", "ST's range status: 0 is a valid measurement"))
-            .signal(sensor("signal_kcps", ValueType::Uint64, "kcps", "Return signal rate").not_default())
-            .signal(sensor("sigma_mm", ValueType::Uint64, "mm", "Distance standard deviation estimate").not_default()),
+            .signal(sensor("distance_mm", ValueType::Uint64, "mm", "Distance to the target").stale_after_ms(1000))
+            .signal(
+                sensor("range_status", ValueType::Uint64, "", "ST's range status: 0 is a valid measurement")
+                    .stale_after_ms(1000),
+            )
+            .signal(
+                sensor("signal_kcps", ValueType::Uint64, "kcps", "Return signal rate")
+                    .not_default()
+                    .stale_after_ms(1000),
+            )
+            .signal(
+                sensor("sigma_mm", ValueType::Uint64, "mm", "Distance standard deviation estimate")
+                    .not_default()
+                    .stale_after_ms(1000),
+            ),
     };
     d.build()
 }
@@ -281,9 +292,11 @@ impl Board {
         }
     }
 
-    /// Check the board is the one configured, set it up, and put its outputs
-    /// in their safe state.
-    pub fn connect(&mut self) -> Result<(), Failure> {
+    /// Check the board is the one configured and set it up: on every connect,
+    /// the first and each one after the board was lost. It leaves outputs as
+    /// they are, so a board that missed a transfer keeps what it was last
+    /// commanded; a board that reset is in its power-on state anyway.
+    pub fn setup(&mut self) -> Result<(), Failure> {
         let delay = &mut Sleep;
         match self {
             Board::Buttons(b) => b.verify()?,
@@ -308,7 +321,7 @@ impl Board {
                 b.start_ranging(delay)?;
             }
         }
-        self.make_safe()
+        Ok(())
     }
 
     /// Outputs to their safe state: every LED off, relays off (the latching
@@ -326,9 +339,15 @@ impl Board {
             Board::OptoRelay(b) => b.off()?,
             Board::LatchRelay(b) => b.off(&mut Sleep)?,
             Board::LedMatrix(b) => clear_matrix(b)?,
-            Board::Motors(b) => match b.status()?.mode {
-                MotorMode::Dc => b.stop()?,
-                MotorMode::Stepper => b.release_coils()?,
+            Board::Motors(b) => match b.status() {
+                Ok(s) if s.mode == MotorMode::Dc => b.stop()?,
+                Ok(_) => b.release_coils()?,
+                // The mode is unknown: send both, then report the read that failed.
+                Err(e) => {
+                    let stopped = b.stop();
+                    let released = b.release_coils();
+                    return Err(stopped.and(released).err().unwrap_or(e).into());
+                }
             },
             _ => {}
         }
@@ -567,7 +586,6 @@ fn latest_range(
     loop {
         if b.data_ready()? {
             let reading = b.read()?;
-            b.clear_interrupt()?;
             *cache = Some((reading, SystemTime::now()));
             break;
         }
@@ -590,8 +608,20 @@ mod tests {
         }
     }
 
-    /// docs/boards.md has a section per board type that names every declared
-    /// signal and function, and documents no function the type lacks.
+    /// The text of a `- Label:` bullet in a section, up to the next bullet.
+    fn bullet<'a>(section: &'a str, label: &str) -> &'a str {
+        let Some(start) = section.find(&format!("- {label}:")) else { return "" };
+        let rest = &section[start + label.len() + 3..];
+        &rest[..rest.find("\n- ").unwrap_or(rest.len())]
+    }
+
+    fn code_spans(text: &str) -> impl Iterator<Item = &str> {
+        text.split('`').skip(1).step_by(2)
+    }
+
+    /// docs/boards.md has a section per board type whose Signals bullet names
+    /// exactly the declared signals, and whose Functions bullet names exactly
+    /// the declared functions, each with its argument names in order.
     #[test]
     fn docs_list_every_signal_and_function() {
         let doc = include_str!("../docs/boards.md");
@@ -601,19 +631,27 @@ mod tests {
             let rest = &doc[start + header.len()..];
             let section = &rest[..rest.find("\n## ").unwrap_or(rest.len())];
             let declared = device_type(t);
-            for s in declared.signals() {
-                assert!(section.contains(&format!("`{}`", s.id())), "{}: signal {} is not documented", t.id(), s.id());
-            }
-            let mut documented: Vec<&str> = section
-                .split('`')
-                .skip(1)
-                .step_by(2)
-                .filter_map(|code| code.split_once('(').map(|(name, _)| name))
-                .collect();
+
+            let mut documented: Vec<&str> = code_spans(bullet(section, "Signals")).collect();
             documented.sort_unstable();
-            documented.dedup();
-            let mut functions: Vec<&str> = declared.functions().iter().map(|f| f.name()).collect();
-            functions.sort_unstable();
+            let mut signals: Vec<&str> = declared.signals().iter().map(|s| s.id()).collect();
+            signals.sort_unstable();
+            assert_eq!(documented, signals, "{}: documented signals differ from declared", t.id());
+
+            let mut documented: Vec<(String, Vec<String>)> = code_spans(bullet(section, "Functions"))
+                .filter_map(|code| code.split_once('('))
+                .map(|(name, args)| {
+                    let args = args.trim_end_matches(')').split(',').map(str::trim).filter(|a| !a.is_empty());
+                    (name.to_owned(), args.map(str::to_owned).collect())
+                })
+                .collect();
+            documented.sort();
+            let mut functions: Vec<(String, Vec<String>)> = declared
+                .functions()
+                .iter()
+                .map(|f| (f.name().to_owned(), f.args().iter().map(|a| a.name().to_owned()).collect()))
+                .collect();
+            functions.sort();
             assert_eq!(documented, functions, "{}: documented functions differ from declared", t.id());
         }
     }

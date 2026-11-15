@@ -13,12 +13,17 @@ supports are on order, and both layers under it are unverified on hardware:
   (`mock: true`). Those models follow the same firmware source and datasheets,
   and are themselves unverified on hardware.
 
-What the tests and the conformance harness do show: the provider speaks ADPP
-correctly (anolis-protocol 1.10.0 harness at level 2), maps each read and call
-onto the driver as [boards.md](boards.md) says, routes through a hub port, and
-reports a board that does not answer as `UNREACHABLE`. What they cannot show is
-that a real board behaves as the models do: the frame lengths and timings, a
-sensor's readings, or what a relay or motor actually does.
+What the tests and the conformance harness do show, against the simulated
+boards: the provider speaks ADPP correctly (anolis-protocol 1.10.0 harness at
+level 2, which reads and calls the first configured board, the motors); it
+routes through a hub port; it reports a board that does not answer as
+`UNREACHABLE` and connects it again; it writes each output's safe state at the
+first connect (tested on the opto relay) and at stop, including for a board
+that was lost during the session or absent at start; and its config checks
+refuse boards that would answer together. The other boards' reads and calls
+are not each exercised. What none of it can show is that a real board behaves
+as the models do: the frame lengths and timings, a sensor's readings, or what a
+relay or motor actually does.
 
 The [Hardware support](https://anolishq.github.io/get-started/hardware) table is
 the one place each board's status is kept. A board moves to `tested` only when
@@ -48,9 +53,11 @@ cable or a Qwiic adapter on the header:
 | black, GND | 6 |
 
 Each board on one cable run needs its own address. Two boards of the same kind
-share a default address: put them on two ports of a Modulino Hub, or change one
-board's address with modulino-driver's `service` module, and give the new
-address in the config.
+share a default address: put them on two different ports of a Modulino Hub, or
+change one board's address with modulino-driver's `service` module, and give
+the new address in the config. A hub port, while selected, is joined to the
+bus, so a board behind a port must not share an address with a board on the
+bus itself.
 
 ## Host preparation
 
@@ -61,15 +68,18 @@ address in the config.
   bus device and does no bus transfer.
 
 On a Raspberry Pi the I2C controller reports an address that nothing answers as
-`EREMOTEIO`, which linux-embedded-hal 0.5 does not treat as a NACK. The
-provider maps `EREMOTEIO` to a NACK itself, so an absent board reads as
-`UNREACHABLE` rather than as a bus fault. That is read from the kernel drivers'
-source; the driver's bench checklist measures it.
+`EREMOTEIO`, which linux-embedded-hal 0.5 does not treat as a NACK (it maps
+only `ENODEV` and `ENXIO`). The provider maps `EREMOTEIO` to a NACK itself,
+because modulino-driver acts on a NACK specifically: the SHT31 Thermo retries a
+NACKed read while a measurement runs. That the Pi returns `EREMOTEIO` is read
+from the kernel drivers' source; the driver's bench checklist measures it.
 
 ## When the provider exits
 
-Every output is put in its safe state (see [boards.md](boards.md)) when the
-provider connects a board, and again when its session ends:
+Every output is put in its safe state (see [boards.md](boards.md)) the first
+time the provider connects a board, and again when its session ends, for every
+board: one that was lost during the session or never answered is tried once
+more. The session ends when:
 
 - the runtime stops it, shuts down or crashes, so the provider's stdin closes;
 - the provider receives `SIGTERM`;
