@@ -104,16 +104,25 @@ again keeps what it was last commanded.
 ## pressure
 
 - Signals: `pressure` (hPa), `temperature` (degC), doubles.
+- Connecting the board waits up to 500 ms for its first sample, before which
+  it holds no reading; with none by then, the board is `UNREACHABLE` until the
+  next attempt.
 
 ## light
 
 - Signals: `lux` (double); `red`, `green`, `blue`, `ir` (uint64 raw counts, *not
   default*).
+- Connecting the board waits up to 500 ms for its first sample, before which
+  it holds no reading; with none by then, the board is `UNREACHABLE` until the
+  next attempt.
 
 ## movement
 
 - Signals: `accel_x`, `accel_y`, `accel_z` (g), `gyro_x`, `gyro_y`, `gyro_z`
   (deg/s), doubles.
+- Connecting the board waits up to 500 ms for its first sample, before which
+  it holds no reading; with none by then, the board is `UNREACHABLE` until the
+  next attempt.
 
 ## distance
 

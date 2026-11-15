@@ -24,6 +24,9 @@ const MONO_BYTES: usize = COLS * ROWS / 8;
 const GRAY_BYTES: usize = COLS * ROWS;
 /// How long a read waits for a first range from the distance sensor.
 const FIRST_RANGE_WAIT: Duration = Duration::from_millis(300);
+/// How long setup waits for a sensor's first sample. The slowest, the
+/// pressure sensor at 10 Hz, takes 100 ms.
+const FIRST_SAMPLE_WAIT: Duration = Duration::from_millis(500);
 
 fn sensor(id: &str, value_type: ValueType, unit: &str, description: &str) -> Signal {
     Signal::new(id, value_type).unit(unit).description(description)
@@ -340,9 +343,22 @@ impl Board {
             Board::Thermo(b) => {
                 b.verify()?;
             }
-            Board::Pressure(b) => b.init()?,
-            Board::Light(b) => b.init()?,
-            Board::Movement(b) => b.init()?,
+            Board::Pressure(b) => {
+                b.init()?;
+                first_sample("pressure sensor", FIRST_SAMPLE_WAIT, || {
+                    Ok(b.pressure_ready()? && b.temperature_ready()?)
+                })?;
+            }
+            Board::Light(b) => {
+                b.init()?;
+                first_sample("light sensor", FIRST_SAMPLE_WAIT, || Ok(b.ready()?))?;
+            }
+            Board::Movement(b) => {
+                b.init()?;
+                first_sample("movement sensor", FIRST_SAMPLE_WAIT, || {
+                    Ok(b.acceleration_ready()? && b.angular_velocity_ready()?)
+                })?;
+            }
             Board::Distance(b, cache) => {
                 *cache = None;
                 b.init(delay)?;
@@ -604,6 +620,21 @@ fn gray_picture(bytes: &[u8]) -> Result<[[u8; COLS]; ROWS], ProviderError> {
     Ok(picture)
 }
 
+/// Wait for a sensor's first sample after `init`, until which its data
+/// registers hold their reset values.
+fn first_sample(what: &str, wait: Duration, mut ready: impl FnMut() -> Result<bool, Failure>) -> Result<(), Failure> {
+    let deadline = Instant::now() + wait;
+    loop {
+        if ready()? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(Failure::Unreachable(format!("the {what} has produced no sample")));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// The newest range: a new measurement if the sensor has one, otherwise the
 /// last one with its own time. Waits briefly for the first after connect.
 fn latest_range(
@@ -628,6 +659,23 @@ fn latest_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_sample_waits_for_the_flag() {
+        let mut polls = 0;
+        let r = first_sample("sensor", Duration::from_secs(1), || {
+            polls += 1;
+            Ok(polls == 3)
+        });
+        assert!(r.is_ok());
+        assert_eq!(polls, 3);
+    }
+
+    #[test]
+    fn first_sample_gives_up_unreachable() {
+        let r = first_sample("sensor", Duration::from_millis(20), || Ok(false));
+        assert!(matches!(r, Err(Failure::Unreachable(m)) if m.contains("no sample")));
+    }
 
     #[test]
     fn every_type_declares() {
