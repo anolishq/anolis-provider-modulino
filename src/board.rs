@@ -292,6 +292,34 @@ impl Board {
         }
     }
 
+    /// Check only that the board at the address is the one configured, with no
+    /// set-up: used at stop before writing a safe state to a board that is not
+    /// connected, so nothing is written to another device.
+    pub fn verify(&mut self) -> Result<(), Failure> {
+        match self {
+            Board::Buttons(b) => b.verify()?,
+            Board::Buzzer(b) => b.verify()?,
+            Board::Vibro(b) => b.verify()?,
+            Board::Pixels(b) => b.verify()?,
+            Board::Knob(b) => b.verify()?,
+            Board::Joystick(b) => b.verify()?,
+            Board::OptoRelay(b) => b.verify()?,
+            Board::LatchRelay(b) => b.verify()?,
+            Board::LedMatrix(b) => b.verify()?,
+            Board::Motors(b) => b.verify()?,
+            Board::Thermo(b) => {
+                b.verify()?;
+            }
+            Board::Pressure(b) => b.verify()?,
+            Board::Light(b) => b.verify()?,
+            Board::Movement(b) => b.verify()?,
+            Board::Distance(b, _) => {
+                b.verify()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Check the board is the one configured and set it up: on every connect,
     /// the first and each one after the board was lost. It leaves outputs as
     /// they are, so a board that missed a transfer keeps what it was last

@@ -77,7 +77,7 @@ impl Slot {
     /// may hold another device, then its outputs are made safe.
     fn finish(&mut self) -> Result<(), Failure> {
         if !self.connected {
-            self.board.setup()?;
+            self.board.verify()?;
         }
         self.board.stop()
     }
@@ -301,8 +301,9 @@ mod tests {
         SimBus::new().with_hub(hub.with_port(port, bus))
     }
 
-    /// Switch the relay through its driver. The SDK's `Args` cannot be built
-    /// outside the SDK, so `Board::call` is covered by the harness instead.
+    /// Switch the relay through its driver. The SDK's `Args` can be built
+    /// outside the SDK only empty, so `Board::call` with arguments is covered
+    /// by the harness instead.
     fn set_relay(slot: &mut Slot, on: bool) {
         slot.with(|b| match b {
             Board::OptoRelay(r) => r.set(on).map_err(Failure::from),
@@ -387,6 +388,40 @@ mod tests {
         relay_present(&shared, true);
         assert!(slot.finish().is_ok());
         assert_eq!(relay_frame(&shared).unwrap(), off, "stop switched the relay off");
+    }
+
+    /// Through the provider itself, as the SDK calls it at session end.
+    #[test]
+    fn provider_stop_makes_safe_a_board_marked_lost() {
+        let config = Config {
+            bus: String::new(),
+            mock: true,
+            devices: vec![DeviceConfig { id: "relay".into(), ..config(BoardType::OptoRelay, None) }],
+        };
+        let mut provider = ModulinoProvider::new(config).unwrap();
+        provider.start(Duration::ZERO).unwrap();
+        set_relay(&mut provider.slots[0], true);
+        // A transfer failed since: the board is not connected at stop.
+        provider.slots[0].connected = false;
+        provider.stop();
+        let on = match &mut provider.slots[0].board {
+            Board::OptoRelay(r) => r.is_on().unwrap(),
+            _ => unreachable!("an opto relay"),
+        };
+        assert!(!on, "the provider's stop switched the relay off");
+    }
+
+    #[test]
+    fn stop_writes_nothing_to_another_kind_of_board() {
+        let at = Kind::OptoRelay.default_address();
+        let (mut slot, shared) =
+            slot(SimBus::new().with_node_at(Kind::Buttons, at), &config(BoardType::OptoRelay, None));
+        assert!(matches!(slot.finish(), Err(Failure::Unreachable(_))));
+        assert_eq!(
+            sim(&shared, |s| s.last_write(at).map(<[u8]>::to_vec)),
+            None,
+            "nothing was written to the buttons board"
+        );
     }
 
     #[test]

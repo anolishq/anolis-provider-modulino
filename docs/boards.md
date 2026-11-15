@@ -119,7 +119,7 @@ again keeps what it was last commanded.
 
 - Signals: `distance_mm`, `range_status` (uint64; status 0 is a valid
   measurement); `signal_kcps`, `sigma_mm` (uint64, *not default*). A read
-  returns the newest range, with the time it was measured; a range more than
-  1 s old is reported STALE.
+  returns the newest range, stamped with the time the provider fetched it; a
+  range fetched more than 1 s before the read is reported STALE.
 - Ranging starts when the provider connects the board and stops when its session
   ends.

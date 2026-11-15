@@ -44,8 +44,8 @@ top of modulino-driver, over a Linux I2C bus.
   specifically (the SHT31 Thermo retries a NACKed read).
 - **A hub port is joined to the bus while selected.** `config::check` refuses a board behind a port at an address
   used on the bus, and any board at a hub's address.
-- **`Args` cannot be built outside the SDK**, so unit tests reach the driver directly; `Board::call` is covered by
-  the harness on the first configured board.
+- **`Args` with values cannot be built outside the SDK** (only `Args::default()`, empty), so unit tests switch outputs
+  through the driver; `Board::call` with arguments is covered by the harness on the first configured board.
 - **linux-embedded-hal with `default-features = false, features = ["i2c"]`.** Its defaults pull in serial and GPIO
   crates; `i2c` alone keeps the release binary static.
 - **The simulated Motors board always reads idle in dc mode** (a SimBus limit), so the stepper branch of
