@@ -1,170 +1,188 @@
-//! The provider: simulated heaters, no hardware.
+//! An Anolis device provider for Arduino Modulino boards, on
+//! [modulino-driver](https://github.com/CameronBrooks11/modulino-driver).
 //!
-//! Start here when writing a provider. Each configured device is a heater with
-//! a first-order thermal model: its temperature moves towards ambient plus the
-//! rise its power level gives, with a fixed time constant, and it counts the
-//! energy it has drawn. Replace the model with calls into your device's driver
-//! and keep the rest of the shape:
-//!
-//! - `HEATER` declares the device type: what the runtime can read and call.
-//! - `Config` declares the config; `check_config` refuses what its schema
-//!   cannot say.
-//! - `read` and `call` serve requests; `stop` puts every output in its safe
-//!   state however the provider exits.
+//! - `board.rs` declares each board type and maps reads and calls onto the
+//!   driver; `config.rs` is the config and what its schema cannot say;
+//!   `bus.rs` is the shared bus and each board's route on it.
+//! - A board that does not answer, answers as another board, or does not
+//!   finish starting is reported UNREACHABLE and tried again on its next
+//!   read or call. Any other failure is answered with its own status.
+//! - `stop` puts every output in its safe state however the session ends.
 
-use std::collections::HashSet;
+mod board;
+mod bus;
+mod config;
+
 use std::process::ExitCode;
-use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anolis_provider_sdk::{
-    Arg, Args, BoxError, CallContext, Category, Device, DeviceType, Function, Provider, ProviderError, Readings,
-    Results, Signal, Value, ValueType,
+    Args, BoxError, CallContext, Device, DeviceHealth, DeviceState, Function, HostRequirement, Provider, ProviderError,
+    Readings, Results,
 };
-use schemars::JsonSchema;
-use serde::Deserialize;
+use linux_embedded_hal::I2cdev;
+use modulino_driver::sim::{SimBus, SimHub};
+use modulino_driver::{Address, ChipKind};
+use std::collections::BTreeMap;
 
-const TIME_CONSTANT: Duration = Duration::from_secs(60);
+use crate::board::{Board, Failure, device_type};
+use crate::bus::{Bus, Route};
+use crate::config::{BoardType, Config};
 
-static HEATER: LazyLock<Arc<DeviceType>> = LazyLock::new(|| {
-    DeviceType::new("heater")
-        .signal(Signal::new("temperature", ValueType::Double).unit("degC").description("Simulated temperature"))
-        .signal(Signal::new("power", ValueType::Double).description("Power level, 0 (off) to 1 (full)"))
-        .signal(
-            Signal::new("energy", ValueType::Double)
-                .unit("J")
-                .description("Energy drawn since the last reset")
-                .not_default(),
-        )
-        // ACTUATE with a required numeric argument whose 0 is safe: the
-        // runtime's zero_is_safe rung can then stop it by calling it with 0.
-        .function(
-            Function::new("set_power")
-                .arg(Arg::double("power").range(0.0, 1.0).description("0 (off) to 1 (full)"))
-                .description("Set the power level; 0 turns the heater off")
-                .category(Category::Actuate)
-                .idempotent(),
-        )
-        .function(
-            Function::new("reset_energy")
-                .result(Arg::double("energy").unit("J").description("The energy count before the reset"))
-                .description("Set the energy count to zero")
-                .category(Category::Config),
-        )
-        .build()
-});
-
-/// anolis-provider-modulino config
-#[derive(Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    #[schemars(length(min = 1))]
-    devices: Vec<HeaterConfig>,
+/// One configured board and what the provider knows of it.
+struct Slot {
+    board: Board,
+    connected: bool,
+    /// Why the board was last found unreachable, while it still is.
+    lost: Option<String>,
 }
 
-#[derive(Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct HeaterConfig {
-    /// Device id
-    #[schemars(regex(pattern = r"^[a-z][a-z0-9_]*$"))]
-    id: String,
-    label: Option<String>,
-    /// Ambient temperature, degC
-    #[serde(default = "default_ambient_c")]
-    ambient_c: f64,
-    /// Temperature rise above ambient at full power, degC
-    #[serde(default = "default_max_rise_c")]
-    #[schemars(extend("exclusiveMinimum" = 0))]
-    max_rise_c: f64,
-    /// Power drawn at full power, W
-    #[serde(default = "default_rated_w")]
-    #[schemars(extend("exclusiveMinimum" = 0))]
-    rated_w: f64,
+struct ModulinoProvider {
+    devices: Vec<Device>,
+    slots: Vec<Slot>,
 }
 
-fn default_ambient_c() -> f64 {
-    20.0
-}
-fn default_max_rise_c() -> f64 {
-    50.0
-}
-fn default_rated_w() -> f64 {
-    100.0
+impl ModulinoProvider {
+    fn slot(&mut self, device: &Device) -> &mut Slot {
+        let index = self.devices.iter().position(|d| d.id() == device.id()).expect("the SDK passes known devices");
+        &mut self.slots[index]
+    }
 }
 
-/// The simulated device. Its state advances to the time it is read or set at.
-struct Heater {
-    ambient_c: f64,
-    max_rise_c: f64,
-    rated_w: f64,
-    temperature: f64,
-    power: f64,
-    energy: f64,
-    at: Instant,
-}
+impl Slot {
+    /// Run `op` on the board, connecting it first if it is not connected,
+    /// and record it unreachable when it does not answer.
+    fn with<T>(&mut self, op: impl FnOnce(&mut Board) -> Result<T, Failure>) -> Result<T, ProviderError> {
+        if !self.connected {
+            self.run(Board::connect)?;
+            self.connected = true;
+        }
+        self.run(op)
+    }
 
-impl Heater {
-    fn new(config: &HeaterConfig, now: Instant) -> Self {
-        Self {
-            ambient_c: config.ambient_c,
-            max_rise_c: config.max_rise_c,
-            rated_w: config.rated_w,
-            temperature: config.ambient_c,
-            power: 0.0,
-            energy: 0.0,
-            at: now,
+    fn run<T>(&mut self, op: impl FnOnce(&mut Board) -> Result<T, Failure>) -> Result<T, ProviderError> {
+        match op(&mut self.board) {
+            Ok(value) => {
+                self.lost = None;
+                Ok(value)
+            }
+            Err(Failure::Unreachable(why)) => {
+                self.connected = false;
+                self.lost = Some(why.clone());
+                Err(ProviderError::unavailable(why))
+            }
+            Err(Failure::Status(error)) => Err(error),
         }
     }
+}
 
-    fn advance(&mut self, now: Instant) {
-        let dt = now.saturating_duration_since(self.at).as_secs_f64();
-        self.at = now;
-        let target = self.ambient_c + self.power * self.max_rise_c;
-        self.temperature = target + (self.temperature - target) * (-dt / TIME_CONSTANT.as_secs_f64()).exp();
-        self.energy += self.power * self.rated_w * dt;
+/// The simulated bus mock mode serves: each configured board, at its
+/// configured address, on the bus or on its hub port. The boards are
+/// modulino-driver's models, which follow the node firmware source and the
+/// chips' datasheets and have not been checked against hardware.
+fn simulated(config: &Config) -> SimBus {
+    let mut top = SimBus::new();
+    let mut ports: BTreeMap<(u8, u8), SimBus> = BTreeMap::new();
+    for d in &config.devices {
+        let segment = match d.hub {
+            None => &mut top,
+            Some(h) => ports.entry((h.address, h.port)).or_default(),
+        };
+        let bus = std::mem::replace(segment, SimBus::new());
+        *segment = match (d.r#type.node_kind(), d.address()) {
+            (Some(kind), Some(addr)) => bus.with_node_at(kind, addr),
+            (Some(kind), None) => bus.with_node(kind),
+            (None, addr) => {
+                let chip = match d.r#type {
+                    BoardType::Thermo => ChipKind::Hs3003,
+                    BoardType::Pressure => ChipKind::Lps22hb,
+                    BoardType::Light => ChipKind::Ltr381rgb,
+                    BoardType::Movement => ChipKind::Lsm6dsox,
+                    _ => ChipKind::Vl53l4cd,
+                };
+                match addr {
+                    Some(addr) => bus.with_chip_at(chip, addr),
+                    None => bus.with_chip(chip),
+                }
+            }
+        };
     }
-}
-
-struct TemplateProvider {
-    devices: Vec<Device>,
-    heaters: Vec<Heater>,
-}
-
-impl TemplateProvider {
-    fn heater(&mut self, device: &Device) -> &mut Heater {
-        let index = self.devices.iter().position(|d| d.id() == device.id()).expect("the SDK passes known devices");
-        let heater = &mut self.heaters[index];
-        heater.advance(Instant::now());
-        heater
+    let mut hubs: BTreeMap<u8, Vec<(u8, SimBus)>> = BTreeMap::new();
+    for ((hub, port), bus) in ports {
+        hubs.entry(hub).or_default().push((port, bus));
     }
+    hubs.into_iter().fold(top, |top, (hub, ports)| {
+        let empty = Address::new(hub).and_then(SimHub::new).expect("the schema limits hub addresses to 0x70-0x77");
+        top.with_hub(ports.into_iter().fold(empty, |h, (port, bus)| h.with_port(port, bus)))
+    })
 }
 
-impl Provider for TemplateProvider {
+fn open(config: &Config) -> Result<Bus, BoxError> {
+    if config.mock {
+        return Ok(Bus::Sim(Box::new(simulated(config))));
+    }
+    let dev = I2cdev::new(&config.bus).map_err(|e| format!("cannot open {}: {e}", config.bus))?;
+    Ok(Bus::Linux(dev))
+}
+
+impl Provider for ModulinoProvider {
     type Config = Config;
     const NAME: &'static str = env!("CARGO_PKG_NAME");
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
     const CONFORMANCE_LEVEL: Option<u32> = Some(2);
 
-    /// What the schema cannot say: each device id once.
     fn check_config(config: &Config) -> Result<(), BoxError> {
-        let mut seen = HashSet::new();
-        for heater in &config.devices {
-            if !seen.insert(&heater.id) {
-                return Err(format!("device id {:?} is configured twice", heater.id).into());
-            }
+        config::check(config)
+    }
+
+    /// The bus device node must exist and be readable and writable by this
+    /// user. Opening it does no bus transaction.
+    fn check_host(config: &Config) -> Result<Vec<HostRequirement>, BoxError> {
+        if config.mock {
+            return Ok(Vec::new());
         }
-        Ok(())
+        let path = &config.bus;
+        let requirement = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+            Ok(_) => HostRequirement::met("bus.access").detail(format!("{path} opens for reading and writing")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HostRequirement::unmet("bus.access")
+                .detail(format!("{path} does not exist"))
+                .remedy("enable I2C (on a Raspberry Pi: raspi-config, Interface Options, I2C) and reboot"),
+            Err(e) => HostRequirement::unmet("bus.access")
+                .detail(format!("cannot open {path}: {e}"))
+                .remedy("run the provider as a user in the i2c group"),
+        };
+        Ok(vec![requirement])
     }
 
     fn new(config: Config) -> Result<Self, BoxError> {
-        let now = Instant::now();
-        let devices = config
-            .devices
-            .iter()
-            .map(|h| Device::new(&h.id, &HEATER).label(h.label.as_ref().unwrap_or(&h.id)))
-            .collect();
-        let heaters = config.devices.iter().map(|h| Heater::new(h, now)).collect();
-        Ok(Self { devices, heaters })
+        let bus = Arc::new(Mutex::new(open(&config)?));
+        let mut devices = Vec::new();
+        let mut slots = Vec::new();
+        for d in &config.devices {
+            let mut device =
+                Device::new(&d.id, device_type(d.r#type)).label(d.label.clone().unwrap_or_else(|| d.id.clone()));
+            if let Some(a) = d.address.or_else(|| d.r#type.default_address()) {
+                device = device.address(format!("{a:#04x}"));
+            }
+            if let Some(h) = d.hub {
+                device = device.tag("hub", format!("{:#04x}", h.address)).tag("hub_port", h.port.to_string());
+            }
+            devices.push(device);
+            slots.push(Slot { board: Board::new(d, Route::new(&bus, d.via())), connected: false, lost: None });
+        }
+        Ok(Self { devices, slots })
+    }
+
+    /// Connect every board, putting its outputs in their safe state. A board
+    /// that does not answer stays listed, UNREACHABLE, and is tried again.
+    fn start(&mut self, _budget: Duration) -> Result<(), BoxError> {
+        for (device, slot) in self.devices.iter().zip(&mut self.slots) {
+            if let Err(e) = slot.with(|_| Ok(())) {
+                eprintln!("{}: WARNING {} not connected: {}", Self::NAME, device.id(), e.message);
+            }
+        }
+        Ok(())
     }
 
     fn devices(&self) -> &[Device] {
@@ -172,13 +190,7 @@ impl Provider for TemplateProvider {
     }
 
     fn read(&mut self, device: &Device, signal_ids: &[&str]) -> Result<Readings, ProviderError> {
-        let heater = self.heater(device);
-        let value = |id: &str| match id {
-            "temperature" => heater.temperature,
-            "power" => heater.power,
-            _ => heater.energy,
-        };
-        Ok(signal_ids.iter().map(|&id| (id.to_owned(), value(id).into())).collect())
+        self.slot(device).with(|b| b.read(signal_ids))
     }
 
     fn call(
@@ -188,86 +200,95 @@ impl Provider for TemplateProvider {
         args: &Args,
         _ctx: &CallContext,
     ) -> Result<Results, ProviderError> {
-        let heater = self.heater(device);
-        match function.name() {
-            // The SDK has already checked power is present and within 0..1.
-            "set_power" => {
-                heater.power = args.f64("power").expect("a required argument");
-                Ok(Results::new())
-            }
-            "reset_energy" => {
-                let energy = std::mem::take(&mut heater.energy);
-                Ok(Results::from([("energy".to_owned(), Value::from(energy))]))
-            }
-            other => unreachable!("undeclared function {other}"), // the SDK only passes declared ones
-        }
+        self.slot(device).with(|b| b.call(function.name(), args))
     }
 
-    /// The provider is exiting, however the session ended: turn every heater off.
+    fn device_health(&self, device: &Device) -> Option<DeviceHealth> {
+        let index = self.devices.iter().position(|d| d.id() == device.id())?;
+        self.slots[index].lost.as_ref().map(|why| DeviceHealth::new(DeviceState::Unreachable, why.clone()))
+    }
+
+    /// The session is ending, however it ended: every connected board's
+    /// outputs to their safe state. A board that does not answer is logged
+    /// and skipped, and the others are still made safe.
     fn stop(&mut self) {
-        let now = Instant::now();
-        for heater in &mut self.heaters {
-            heater.advance(now);
-            heater.power = 0.0;
+        for (device, slot) in self.devices.iter().zip(&mut self.slots) {
+            if !slot.connected {
+                continue;
+            }
+            match slot.board.stop() {
+                Ok(()) => {}
+                Err(Failure::Unreachable(why)) => {
+                    eprintln!("{}: WARNING {} not made safe: {why}", Self::NAME, device.id())
+                }
+                Err(Failure::Status(e)) => {
+                    eprintln!("{}: WARNING {} not made safe: {}", Self::NAME, device.id(), e.message)
+                }
+            }
         }
     }
 }
 
 fn main() -> ExitCode {
-    anolis_provider_sdk::run::<TemplateProvider>()
+    anolis_provider_sdk::run::<ModulinoProvider>()
 }
 
 #[cfg(test)]
 mod tests {
-    //! The heater model and the provider's own rules. The protocol itself is
-    //! covered by the conformance harness (scripts/conformance.py).
-
     use super::*;
+    use crate::config::{DeviceConfig, HubConfig};
+    use anolis_provider_sdk::StatusCode;
+    use modulino_driver::Kind;
 
-    fn config(ambient_c: f64, max_rise_c: f64, rated_w: f64) -> HeaterConfig {
-        HeaterConfig { id: "h0".into(), label: None, ambient_c, max_rise_c, rated_w }
+    /// A Buttons board at its default address, with buttons pressed as given.
+    fn buttons(pressed: [u8; 3]) -> SimBus {
+        let mut bus = SimBus::new().with_node(Kind::Buttons);
+        assert!(bus.set_reading(Kind::Buttons.default_address(), &pressed));
+        bus
+    }
+
+    fn buttons_config(hub: Option<HubConfig>) -> DeviceConfig {
+        DeviceConfig { id: "b0".into(), r#type: BoardType::Buttons, label: None, address: None, hub }
+    }
+
+    fn slot(bus: SimBus, config: &DeviceConfig) -> Slot {
+        let bus = Arc::new(Mutex::new(Bus::Sim(Box::new(bus))));
+        Slot { board: Board::new(config, Route::new(&bus, config.via())), connected: false, lost: None }
+    }
+
+    fn hub(port: u8, bus: SimBus) -> SimBus {
+        let hub = Address::new(0x70).and_then(SimHub::new).expect("0x70 is a hub address");
+        SimBus::new().with_hub(hub.with_port(port, bus))
     }
 
     #[test]
-    fn a_heater_starts_off_at_ambient() {
-        let t0 = Instant::now();
-        let mut h = Heater::new(&config(21.0, 50.0, 100.0), t0);
-        h.advance(t0 + Duration::from_secs(600));
-        assert_eq!((h.temperature, h.power, h.energy), (21.0, 0.0, 0.0));
+    fn a_board_behind_a_hub_port_is_read_through_it() {
+        let mut slot = slot(hub(2, buttons([1, 0, 1])), &buttons_config(Some(HubConfig { address: 0x70, port: 2 })));
+        let read = slot.with(|b| b.read(&["a", "b", "c"])).unwrap();
+        assert_eq!(read["a"].value, true.into());
+        assert_eq!(read["b"].value, false.into());
+        assert_eq!(read["c"].value, true.into());
+        assert!(slot.connected && slot.lost.is_none());
     }
 
     #[test]
-    fn full_power_approaches_ambient_plus_the_rise() {
-        let t0 = Instant::now();
-        let mut h = Heater::new(&config(20.0, 50.0, 100.0), t0);
-        h.power = 1.0;
-        h.advance(t0 + TIME_CONSTANT);
-        assert!((h.temperature - (20.0 + 50.0 * (1.0 - (-1.0f64).exp()))).abs() < 1e-9, "{}", h.temperature);
-        h.advance(t0 + TIME_CONSTANT * 21);
-        assert!((h.temperature - 70.0).abs() < 0.01, "{}", h.temperature);
+    fn a_board_on_another_port_is_unreachable_not_a_fault() {
+        let mut slot = slot(hub(2, buttons([0, 0, 0])), &buttons_config(Some(HubConfig { address: 0x70, port: 3 })));
+        let err = slot.with(|b| b.read(&["a"])).unwrap_err();
+        assert_eq!(err.code, StatusCode::Unavailable);
+        assert!(!slot.connected && slot.lost.is_some());
     }
 
     #[test]
-    fn energy_counts_power_times_rating() {
-        let t0 = Instant::now();
-        let mut h = Heater::new(&config(20.0, 50.0, 60.0), t0);
-        h.power = 0.5;
-        h.advance(t0 + Duration::from_secs(10));
-        assert!((h.energy - 300.0).abs() < 1e-9, "{}", h.energy);
-    }
-
-    #[test]
-    fn stop_turns_every_heater_off() {
-        let mut p = TemplateProvider::new(Config { devices: vec![config(20.0, 50.0, 100.0)] }).unwrap();
-        p.heaters[0].power = 1.0;
-        p.stop();
-        assert_eq!(p.heaters[0].power, 0.0);
-    }
-
-    #[test]
-    fn a_device_id_configured_twice_is_refused() {
-        let twice = Config { devices: vec![config(20.0, 50.0, 100.0), config(20.0, 50.0, 100.0)] };
-        let err = TemplateProvider::check_config(&twice).unwrap_err();
-        assert!(err.to_string().contains("configured twice"), "{err}");
+    fn a_lost_board_is_tried_again_and_recovers() {
+        let mut slot = slot(SimBus::new(), &buttons_config(None));
+        assert!(slot.with(|b| b.read(&["a"])).is_err());
+        assert!(slot.lost.is_some());
+        // Put the board on the bus: the next read connects it again.
+        let bus = Arc::new(Mutex::new(Bus::Sim(Box::new(buttons([0, 1, 0])))));
+        slot.board = Board::new(&buttons_config(None), Route::new(&bus, None));
+        let read = slot.with(|b| b.read(&["b"])).unwrap();
+        assert_eq!(read["b"].value, true.into());
+        assert!(slot.lost.is_none() && slot.connected);
     }
 }

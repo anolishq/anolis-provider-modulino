@@ -1,9 +1,25 @@
-# Config for the conformance harness and CI. The heaters are simulated, so no
-# hardware is needed.
+# Config for the conformance harness and CI: every board type once, as
+# simulated boards (modulino-driver's sim models), so no hardware is needed.
+# The buttons board sits behind a Modulino Hub port, so routing runs too.
+# The motors board comes first: the harness reads and calls the first device,
+# and it has signals, a function with required arguments (set_speeds) and
+# one without (stop).
+mock: true
 devices:
-  - id: heater0
-    label: Heater 0
-  - id: heater1
-    ambient_c: 22.5
-    max_rise_c: 30
-    rated_w: 60
+  - { id: motors0, type: motors }
+  - { id: buzzer0, type: buzzer }
+  - id: buttons0
+    type: buttons
+    hub: { address: 0x70, port: 2 }
+  - { id: vibro0, type: vibro }
+  - { id: pixels0, type: pixels }
+  - { id: knob0, type: knob }
+  - { id: joystick0, type: joystick }
+  - { id: opto0, type: opto_relay }
+  - { id: latch0, type: latch_relay }
+  - { id: matrix0, type: led_matrix }
+  - { id: thermo0, type: thermo }
+  - { id: pressure0, type: pressure }
+  - { id: light0, type: light }
+  - { id: movement0, type: movement }
+  - { id: distance0, type: distance }
