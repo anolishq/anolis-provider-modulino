@@ -44,12 +44,14 @@ top of modulino-driver, over a Linux I2C bus.
   specifically (the SHT31 Thermo retries a NACKed read).
 - **A hub port is joined to the bus while selected.** `config::check` refuses a board behind a port at an address
   used on the bus, and any board at a hub's address.
-- **`Args` with values cannot be built outside the SDK** (only `Args::default()`, empty), so unit tests switch outputs
-  through the driver; `Board::call` with arguments is covered by the harness on the first configured board.
+- **Every board's reads and calls are tested** (`every_board_reads_every_signal`, `every_board_runs_every_function`):
+  a new function needs a row in the latter's call table, or it fails. Its arguments are built with
+  `Args::from_iter` (SDK 0.1.1), which the SDK does not validate, so give only values the declaration allows.
 - **linux-embedded-hal with `default-features = false, features = ["i2c"]`.** Its defaults pull in serial and GPIO
   crates; `i2c` alone keeps the release binary static.
-- **The simulated Motors board always reads idle in dc mode** (a SimBus limit), so the stepper branch of
-  `make_safe` never runs in mock mode.
+- **SimBus test settings**: `set_reading` sets a node's payload, including the Motors status (all 5 bytes: a short
+  payload pads with 0xFF, a busy stepper); `set_ready` holds a chip's data-ready flags clear; `set_read_fault` fails
+  reads while writes land. `last_write` keeps one frame per board, so the order of two frames cannot be tested.
 - **Hardware status lives on the docs site's Hardware support table**, not here; `docs/hardware.md` says what has
   and has not run.
 - The SDK is pinned by release tag in `Cargo.toml`; `Cargo.lock` records the commit the tag resolved to.
