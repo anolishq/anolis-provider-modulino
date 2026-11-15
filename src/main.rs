@@ -47,6 +47,30 @@ struct ModulinoProvider {
 }
 
 impl ModulinoProvider {
+    /// The provider for `config`, its boards sharing `bus`.
+    fn on_bus(config: &Config, bus: &Arc<Mutex<Bus>>) -> Self {
+        let mut devices = Vec::new();
+        let mut slots = Vec::new();
+        for d in &config.devices {
+            let mut device =
+                Device::new(&d.id, device_type(d.r#type)).label(d.label.clone().unwrap_or_else(|| d.id.clone()));
+            if let Some(a) = d.address.or_else(|| d.r#type.default_address()) {
+                device = device.address(format!("{a:#04x}"));
+            }
+            if let Some(h) = d.hub {
+                device = device.tag("hub", format!("{:#04x}", h.address)).tag("hub_port", h.port.to_string());
+            }
+            devices.push(device);
+            slots.push(Slot {
+                board: Board::new(d, Route::new(bus, d.via())),
+                connected: false,
+                made_safe: false,
+                lost: None,
+            });
+        }
+        Self { devices, slots }
+    }
+
     fn slot(&mut self, device: &Device) -> &mut Slot {
         let index = self.devices.iter().position(|d| d.id() == device.id()).expect("the SDK passes known devices");
         &mut self.slots[index]
@@ -177,27 +201,7 @@ impl Provider for ModulinoProvider {
     }
 
     fn new(config: Config) -> Result<Self, BoxError> {
-        let bus = Arc::new(Mutex::new(open(&config)?));
-        let mut devices = Vec::new();
-        let mut slots = Vec::new();
-        for d in &config.devices {
-            let mut device =
-                Device::new(&d.id, device_type(d.r#type)).label(d.label.clone().unwrap_or_else(|| d.id.clone()));
-            if let Some(a) = d.address.or_else(|| d.r#type.default_address()) {
-                device = device.address(format!("{a:#04x}"));
-            }
-            if let Some(h) = d.hub {
-                device = device.tag("hub", format!("{:#04x}", h.address)).tag("hub_port", h.port.to_string());
-            }
-            devices.push(device);
-            slots.push(Slot {
-                board: Board::new(d, Route::new(&bus, d.via())),
-                connected: false,
-                made_safe: false,
-                lost: None,
-            });
-        }
-        Ok(Self { devices, slots })
+        Ok(Self::on_bus(&config, &Arc::new(Mutex::new(open(&config)?))))
     }
 
     /// Connect every board, putting its outputs in their safe state. A board
@@ -261,8 +265,9 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use crate::config::{DeviceConfig, HubConfig};
-    use anolis_provider_sdk::StatusCode;
+    use anolis_provider_sdk::{Quality, StatusCode};
     use modulino_driver::Kind;
+    use std::collections::BTreeSet;
 
     type Shared = Arc<Mutex<Bus>>;
 
@@ -301,9 +306,7 @@ mod tests {
         SimBus::new().with_hub(hub.with_port(port, bus))
     }
 
-    /// Switch the relay through its driver. The SDK's `Args` can be built
-    /// outside the SDK only empty, so `Board::call` with arguments is covered
-    /// by the harness instead.
+    /// Switch the relay through its driver.
     fn set_relay(slot: &mut Slot, on: bool) {
         slot.with(|b| match b {
             Board::OptoRelay(r) => r.set(on).map_err(Failure::from),
@@ -453,6 +456,113 @@ mod tests {
             assert_eq!(last(), Some(encode_decay(DecayMode::Slow).to_vec()));
             assert!(slot.finish().is_ok());
             assert_eq!(last(), Some(safe.to_vec()), "stop, flags {flags:#04x}");
+        }
+    }
+
+    /// A provider in mock mode with one of every board type on the bus.
+    fn every_board() -> (ModulinoProvider, Shared) {
+        let devices = BoardType::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| DeviceConfig { id: format!("d{i}"), ..config(t, None) })
+            .collect();
+        let config = Config { bus: String::new(), mock: true, devices };
+        let shared = Arc::new(Mutex::new(Bus::Sim(simulated(&config))));
+        let mut provider = ModulinoProvider::on_bus(&config, &shared);
+        provider.start(Duration::ZERO).unwrap();
+        (provider, shared)
+    }
+
+    #[test]
+    fn every_board_reads_every_signal() {
+        let (mut provider, _) = every_board();
+        for device in provider.devices().to_vec() {
+            let signals = device.device_type().signals();
+            let ids: Vec<&str> = signals.iter().map(|s| s.id()).collect();
+            let read =
+                provider.read(&device, &ids).unwrap_or_else(|e| panic!("{}: {}", device.device_type().id(), e.message));
+            assert_eq!(read.len(), ids.len(), "{}", device.device_type().id());
+            for s in signals {
+                let r = &read[s.id()];
+                assert_eq!(r.value.value_type(), s.value_type(), "{}.{}", device.device_type().id(), s.id());
+                assert_eq!(r.quality, Quality::Ok, "{}.{}", device.device_type().id(), s.id());
+            }
+        }
+    }
+
+    /// Every declared function, called through the provider with valid
+    /// arguments in an order where each frame differs from the one before.
+    #[test]
+    fn every_board_runs_every_function() {
+        use anolis_provider_sdk::{Args, CallContext, Value};
+        let v = |pairs: &[(&str, Value)]| Args::from_iter(pairs.iter().cloned());
+        // Type, function, arguments, and whether the call writes to the board
+        // (knob and joystick settings are kept by the provider).
+        let calls: Vec<(&str, &str, Args, bool)> = vec![
+            ("buttons", "set_leds", v(&[("a", true.into()), ("b", false.into()), ("c", true.into())]), true),
+            ("buzzer", "tone", v(&[("frequency_hz", 440u64.into()), ("duration_ms", 100u64.into())]), true),
+            ("buzzer", "no_tone", Args::default(), true),
+            ("vibro", "vibrate", v(&[("duration_ms", 100u64.into()), ("power", 50u64.into())]), true),
+            ("vibro", "off", Args::default(), true),
+            (
+                "pixels",
+                "set",
+                v(&[
+                    ("index", 1u64.into()),
+                    ("red", 10u64.into()),
+                    ("green", 20u64.into()),
+                    ("blue", 30u64.into()),
+                    ("brightness", 50u64.into()),
+                ]),
+                true,
+            ),
+            (
+                "pixels",
+                "set_all",
+                v(&[("red", 1u64.into()), ("green", 2u64.into()), ("blue", 3u64.into()), ("brightness", 40u64.into())]),
+                true,
+            ),
+            ("pixels", "off", Args::default(), true),
+            ("knob", "set_position", v(&[("position", 5i64.into())]), false),
+            ("joystick", "set_deadzone", v(&[("deadzone", 10u64.into())]), false),
+            ("opto_relay", "set", v(&[("on", true.into())]), true),
+            ("latch_relay", "set", v(&[("on", true.into())]), true),
+            ("led_matrix", "show_mono", v(&[("pixels", vec![0xFFu8; 12].into())]), true),
+            ("led_matrix", "show_gray", v(&[("levels", vec![15u8; 96].into())]), true),
+            ("led_matrix", "clear", Args::default(), true),
+            ("motors", "set_speeds", v(&[("a", 100i64.into()), ("b", (-100i64).into())]), true),
+            ("motors", "stop", Args::default(), true),
+            ("motors", "set_mode", v(&[("mode", "stepper".into())]), true),
+            ("motors", "step", v(&[("steps", 10i64.into()), ("period_ticks", 5u64.into())]), true),
+            ("motors", "release_coils", Args::default(), true),
+            ("motors", "set_mode", v(&[("mode", "dc".into())]), true),
+        ];
+        let (mut provider, shared) = every_board();
+        let devices = provider.devices().to_vec();
+        let declared: BTreeSet<(String, String)> = devices
+            .iter()
+            .flat_map(|d| {
+                d.device_type().functions().iter().map(|f| (d.device_type().id().to_owned(), f.name().to_owned()))
+            })
+            .collect();
+        let called: BTreeSet<(String, String)> =
+            calls.iter().map(|(t, f, _, _)| (t.to_string(), f.to_string())).collect();
+        assert_eq!(called, declared, "the table names every declared function");
+        for (t, name, args, writes) in &calls {
+            let index = devices.iter().position(|d| d.device_type().id() == *t).unwrap();
+            let device = &devices[index];
+            let function = device.device_type().functions().iter().find(|f| f.name() == *name).unwrap();
+            let at =
+                BoardType::ALL[index].node_kind().expect("every board with a function is a node").default_address();
+            let frame = || sim(&shared, |s| s.last_write(at).map(<[u8]>::to_vec));
+            let before = frame();
+            let results = provider
+                .call(device, function, args, &CallContext::default())
+                .unwrap_or_else(|e| panic!("{t}.{name}: {}", e.message));
+            assert!(results.is_empty(), "{t}.{name} declares no results");
+            if *writes {
+                assert_ne!(frame(), before, "{t}.{name} wrote a new frame");
+            }
         }
     }
 
