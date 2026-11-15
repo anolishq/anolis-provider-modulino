@@ -75,6 +75,9 @@ bus itself.
 - Run the provider as a user in the `i2c` group, so it can open the bus.
 - `anolis-provider-modulino --check-host <config>` reports both: it opens the
   bus device and does no bus transfer.
+- Started before either holds, the provider stays up: the runtime shows it
+  not ready in `/v0/providers/health`, with the unmet `bus.access` requirement
+  and why, and it lists no boards until it is restarted on a prepared host.
 
 On a Raspberry Pi the I2C controller reports an address that nothing answers as
 `EREMOTEIO`, which linux-embedded-hal 0.5 does not treat as a NACK (it maps

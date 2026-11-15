@@ -61,11 +61,24 @@ impl i2c::Error for BusError {
     }
 }
 
-/// The bus the provider opened: the Linux I2C device, or modulino-driver's
+/// The bus the boards share: the Linux I2C device, or modulino-driver's
 /// simulated boards in mock mode.
 pub enum Bus {
-    Linux(I2cdev),
+    /// Opened at the first transfer, and again at each one until it opens,
+    /// so a provider started before the bus can be opened (I2C not yet
+    /// enabled, or no permission) stays up: in a session the SDK's host check
+    /// then reports `bus.access` unmet, and any transfer fails with why.
+    Linux {
+        path: String,
+        dev: Option<I2cdev>,
+    },
     Sim(SimBus),
+}
+
+impl Bus {
+    pub fn linux(path: &str) -> Self {
+        Bus::Linux { path: path.to_owned(), dev: None }
+    }
 }
 
 impl ErrorType for Bus {
@@ -75,7 +88,16 @@ impl ErrorType for Bus {
 impl I2c for Bus {
     fn transaction(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), BusError> {
         match self {
-            Bus::Linux(dev) => dev.transaction(address, operations).map_err(|e| BusError::linux(&e)),
+            Bus::Linux { path, dev } => {
+                let dev = match dev {
+                    Some(dev) => dev,
+                    None => dev.insert(I2cdev::new(&*path).map_err(|e| BusError {
+                        kind: ErrorKind::Other,
+                        message: format!("cannot open {path}: {e}"),
+                    })?),
+                };
+                dev.transaction(address, operations).map_err(|e| BusError::linux(&e))
+            }
             Bus::Sim(sim) => sim.transaction(address, operations).map_err(|e| BusError::sim(&e)),
         }
     }
