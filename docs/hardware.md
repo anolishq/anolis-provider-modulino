@@ -45,6 +45,9 @@ in this order:
    runtime's software stop on the outputs, and a board unplugged and plugged
    back in while the provider runs.
 
+[bench.md](bench.md) has both, step by step, with the configs and the script
+for the second.
+
 ## Wiring
 
 Modulino boards use the Qwiic/STEMMA QT connector (4-pin JST SH) at 3.3 V and
