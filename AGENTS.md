@@ -19,9 +19,9 @@ top of modulino-driver, over a Linux I2C bus.
   (frames, registers, addresses' meaning) in this repository. A missing or wrong protocol fact is fixed in
   modulino-driver, with its citation, not worked around here.
 - **Vendor drivers follow the rules in the SDK guide's
-  [Vendor drivers](https://github.com/anolishq/anolis-provider-sdk-python/blob/main/docs/writing-a-provider.md#vendor-drivers)
-  section** (written for the Python SDK; the rules are the same). modulino-driver is the in-house driver for a vendor
-  with no Rust driver: it lives in its own repository and is pinned here by commit until it is tagged.
+  [Vendor drivers](https://github.com/anolishq/anolis-provider-sdk-rust/blob/main/docs/writing-a-provider.md#vendor-drivers)
+  section.** modulino-driver is the in-house driver for a vendor with no Rust driver: it lives in its own repository
+  and is pinned here by commit until it is tagged.
 - **Mock mode runs the real driver** on modulino-driver's `sim::SimBus`. Never stub the driver.
 - **UNREACHABLE is for the bus and the board's presence.** `classify` in `src/board.rs`: any bus error (a NACK, or a
   fault on the bus itself), a wrong identity or chip, or a timeout marks the board lost and it is retried; any other
