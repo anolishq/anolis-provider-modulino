@@ -13,6 +13,21 @@ connects the board, and again when its session ends (see
 [hardware.md](hardware.md)). A board that misses a transfer and is connected
 again keeps what it was last commanded.
 
+**Identity** is checked when a board connects: the first time, and again after
+it stops answering (a bus error or a timeout marks it lost). It is not checked
+before each call, so a different board put at the same address with no failed
+transfer in between would take the commands meant for the configured one. No
+two board types share a factory address, so that takes a board moved there on
+purpose.
+
+**Deadlines.** The SDK refuses a call whose deadline has already passed. A
+call that is running is not stopped: it is one or a few I2C writes, and a
+write the board has taken cannot be undone. If the deadline passes before the
+call returns, the SDK answers `DEADLINE_EXCEEDED`, with side effects possible.
+The longest waits are the latch relay's 120 ms coil pulse, up to 500 ms for a
+sensor's first sample when it connects, and up to 300 ms on a read for the
+distance sensor's first range.
+
 ## buttons
 
 - Signals: `a`, `b`, `c` (bool): each button is pressed.
