@@ -556,6 +556,15 @@ impl Board {
             }
             (Board::Motors(b), "release_coils") => b.release_coils()?,
             (Board::Motors(b), "set_mode") => {
+                // The firmware's mode switch leaves `busy` set mid-move
+                // (modulino-driver's MotorStatus docs); only a stepper command
+                // or the move's end clears it.
+                if b.status()?.busy {
+                    return Err(Failure::Status(ProviderError::new(
+                        StatusCode::FailedPrecondition,
+                        "a stepper move is running: call release_coils, or wait for it to end",
+                    )));
+                }
                 let mode = match args.str("mode") {
                     Some("stepper") => MotorMode::Stepper,
                     _ => MotorMode::Dc,
