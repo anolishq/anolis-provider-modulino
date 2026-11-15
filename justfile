@@ -1,4 +1,4 @@
-# anolis-provider-template-rust dev commands. `check` + `test` are what CI's
+# anolis-provider-modulino dev commands. `check` + `test` are what CI's
 # check and test jobs run; python3 is needed for the conformance harness.
 
 harness_wheel := "https://github.com/anolishq/anolis-protocol/releases/download/v1.10.0/anolis_protocol-1.10.0-py3-none-any.whl"
@@ -25,7 +25,7 @@ check:
 test: setup
     cargo test --locked
     cargo build --locked
-    python3 scripts/conformance.py target/debug/anolis-provider-template-rust .harness/bin/anolis-adpp-conformance
+    python3 scripts/conformance.py target/debug/anolis-provider-modulino .harness/bin/anolis-adpp-conformance
 
 # Build the static release binary for this host (needs the musl target: rustup target add <arch>-unknown-linux-musl)
 release:

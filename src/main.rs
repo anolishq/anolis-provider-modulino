@@ -54,7 +54,7 @@ static HEATER: LazyLock<Arc<DeviceType>> = LazyLock::new(|| {
         .build()
 });
 
-/// anolis-provider-template-rust config
+/// anolis-provider-modulino config
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Config {
