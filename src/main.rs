@@ -580,6 +580,24 @@ mod tests {
         }
     }
 
+    /// A mode switch while a stepper move runs is refused, and allowed once
+    /// the move has ended.
+    #[test]
+    fn motors_set_mode_is_refused_mid_move() {
+        use anolis_provider_sdk::{Args, Value};
+        let at = Kind::Motors.default_address();
+        let mut bus = SimBus::new().with_node(Kind::Motors);
+        assert!(bus.set_reading(at, &[0, 0, 0, 0, 0x03]), "a busy stepper");
+        let (mut slot, shared) = slot(bus, &config(BoardType::Motors, None));
+        let dc = Args::from_iter([("mode", Value::from("dc"))]);
+        let err = slot.with(|b| b.call("set_mode", &dc)).unwrap_err();
+        assert_eq!(err.code, StatusCode::FailedPrecondition);
+        let before = sim(&shared, |s| s.last_write(at).map(<[u8]>::to_vec));
+        assert!(sim(&shared, |s| s.set_reading(at, &[0, 0, 0, 0, 0x02])), "the move ended");
+        slot.with(|b| b.call("set_mode", &dc)).unwrap();
+        assert_ne!(sim(&shared, |s| s.last_write(at).map(<[u8]>::to_vec)), before, "the switch was sent");
+    }
+
     /// When the Motors board's mode cannot be read at stop, both safe
     /// commands go out and the failed read is reported.
     #[test]

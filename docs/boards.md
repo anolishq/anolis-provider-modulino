@@ -93,7 +93,9 @@ again keeps what it was last commanded.
   mode, ACTUATE), `step(steps, period_ticks)` (signed steps; one step every
   `period_ticks` × 0.1 ms, 1-65535; stepper mode; the coils stay energised
   afterwards; ACTUATE), `release_coils()` (stepper mode, ACTUATE),
-  `set_mode(mode)` (`dc` or `stepper`, CONFIG).
+  `set_mode(mode)` (`dc` or `stepper`, CONFIG; refused with
+  `FAILED_PRECONDITION` while a stepper move runs, since switching then leaves
+  `busy` set: `release_coils` first, or wait for the move to end).
 - Safe state: in dc mode, both motors stopped; in stepper mode, coils released.
   If the board's mode cannot be read, both are sent.
 
