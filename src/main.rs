@@ -566,6 +566,34 @@ mod tests {
         }
     }
 
+    /// When the Motors board's mode cannot be read at stop, both safe
+    /// commands go out and the failed read is reported.
+    #[test]
+    fn motors_stop_sends_both_when_the_mode_cannot_be_read() {
+        use embedded_hal::i2c::ErrorKind;
+        use modulino_driver::codec::motors::{encode_dc_speed, encode_stepper};
+        let at = Kind::Motors.default_address();
+        let mut bus = SimBus::new().with_node(Kind::Motors);
+        assert!(bus.set_reading(at, &[0, 0, 0, 0, 0x01]));
+        let (mut slot, shared) = slot(bus, &config(BoardType::Motors, None));
+        slot.with(|b| match b {
+            Board::Motors(m) => m.set_speeds(100, 0).map_err(Failure::from),
+            _ => unreachable!("a motors board"),
+        })
+        .unwrap();
+        assert_eq!(
+            sim(&shared, |s| s.last_write(at).map(<[u8]>::to_vec)),
+            Some(encode_dc_speed(100, 0).unwrap().to_vec())
+        );
+        assert!(sim(&shared, |s| s.set_read_fault(at, Some(ErrorKind::Other))));
+        assert!(matches!(slot.finish(), Err(Failure::Unreachable(_))), "the failed read is reported");
+        // Only the last frame is kept: the release, sent after the stop.
+        assert_eq!(
+            sim(&shared, |s| s.last_write(at).map(<[u8]>::to_vec)),
+            Some(encode_stepper(0, 1, 1).unwrap().to_vec())
+        );
+    }
+
     #[test]
     fn stop_writes_nothing_to_another_kind_of_board() {
         let at = Kind::OptoRelay.default_address();
